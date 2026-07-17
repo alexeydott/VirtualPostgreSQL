@@ -29,6 +29,63 @@ set(VPS_SQLITE_AMALGAMATION_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/build/deps/sqlite-3.53.3/sqlite-amalgamation-3530300"
   CACHE PATH "Directory containing pinned sqlite3.c/sqlite3.h/sqlite3ext.h")
 option(VPS_BUILD_EXTENSION "Build the loadable extension and SQLite host tests" ON)
+option(VPS_ENABLE_ASAN "Enable AddressSanitizer for supported Windows targets" OFF)
+
+if(VPS_ENABLE_ASAN)
+  if(NOT (MSVC AND CMAKE_C_COMPILER_ID MATCHES "Clang"))
+    message(FATAL_ERROR
+      "[sanitizer] VPS_ENABLE_ASAN requires clang-cl on Windows")
+  endif()
+  if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR
+      "[sanitizer] the current AddressSanitizer contour supports x64 only")
+  endif()
+
+  execute_process(
+    COMMAND "${CMAKE_C_COMPILER}" -print-resource-dir
+    OUTPUT_VARIABLE VPS_CLANG_RESOURCE_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE VPS_CLANG_RESOURCE_RESULT
+  )
+  if(NOT VPS_CLANG_RESOURCE_RESULT EQUAL 0)
+    message(FATAL_ERROR
+      "[sanitizer] unable to discover the clang resource directory")
+  endif()
+
+  set(VPS_CLANG_ASAN_DIR "${VPS_CLANG_RESOURCE_DIR}/lib/windows")
+  set(VPS_CLANG_ASAN_RUNTIME
+    "${VPS_CLANG_ASAN_DIR}/clang_rt.asan-x86_64.lib")
+  set(VPS_CLANG_ASAN_CXX_RUNTIME
+    "${VPS_CLANG_ASAN_DIR}/clang_rt.asan_cxx-x86_64.lib")
+  foreach(vps_asan_file IN ITEMS
+      "${VPS_CLANG_ASAN_RUNTIME}"
+      "${VPS_CLANG_ASAN_CXX_RUNTIME}")
+    if(NOT EXISTS "${vps_asan_file}")
+      message(FATAL_ERROR
+        "[sanitizer] required clang runtime is missing: ${vps_asan_file}")
+    endif()
+  endforeach()
+endif()
+
+function(vps_apply_asan target_name)
+  if(NOT VPS_ENABLE_ASAN)
+    return()
+  endif()
+  target_compile_options(${target_name} PRIVATE /fsanitize=address)
+
+  get_target_property(vps_target_type ${target_name} TYPE)
+  if(NOT vps_target_type STREQUAL "STATIC_LIBRARY")
+    target_link_libraries(${target_name} PRIVATE
+      "${VPS_CLANG_ASAN_RUNTIME}"
+      "${VPS_CLANG_ASAN_CXX_RUNTIME}"
+    )
+    target_link_options(${target_name} PRIVATE
+      "/wholearchive:${VPS_CLANG_ASAN_RUNTIME}"
+      "/wholearchive:${VPS_CLANG_ASAN_CXX_RUNTIME}"
+      /INFERASANLIBS:NO
+    )
+  endif()
+endfunction()
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
   message(FATAL_ERROR
@@ -87,6 +144,67 @@ target_include_directories(vps_abi
 )
 vps_apply_strict_warnings(vps_abi)
 
+add_library(vps_memory STATIC
+  src/vps_memory.c
+)
+target_compile_features(vps_memory PUBLIC c_std_11)
+set_target_properties(vps_memory PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_memory PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+vps_apply_strict_warnings(vps_memory)
+vps_apply_asan(vps_memory)
+
+add_library(vps_error STATIC
+  src/vps_error.c
+)
+target_compile_features(vps_error PUBLIC c_std_11)
+set_target_properties(vps_error PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_error
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+  PRIVATE
+    "${VPS_SQLITE_AMALGAMATION_DIR}"
+)
+target_link_libraries(vps_error PUBLIC vps_memory)
+vps_apply_strict_warnings(vps_error)
+vps_apply_asan(vps_error)
+
+add_library(vps_logging STATIC
+  src/vps_logging.c
+)
+target_compile_features(vps_logging PUBLIC c_std_11)
+set_target_properties(vps_logging PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_logging PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+vps_apply_strict_warnings(vps_logging)
+vps_apply_asan(vps_logging)
+
+add_library(vps_deadline STATIC
+  src/vps_deadline.c
+)
+target_compile_features(vps_deadline PUBLIC c_std_11)
+set_target_properties(vps_deadline PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_deadline PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_deadline PUBLIC vps_logging vps_platform)
+vps_apply_strict_warnings(vps_deadline)
+vps_apply_asan(vps_deadline)
+
 add_library(vps_platform STATIC
   src/vps_platform.c
   src/vps_android.c
@@ -107,6 +225,25 @@ if(WIN32)
   target_link_libraries(vps_platform PRIVATE bcrypt ws2_32)
 endif()
 vps_apply_strict_warnings(vps_platform)
+
+add_library(vps_secure_memory STATIC
+  src/vps_secure_memory.c
+)
+target_compile_features(vps_secure_memory PUBLIC c_std_11)
+set_target_properties(vps_secure_memory PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_secure_memory PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_secure_memory PUBLIC
+  vps_logging
+  vps_memory
+  vps_platform
+)
+vps_apply_strict_warnings(vps_secure_memory)
+vps_apply_asan(vps_secure_memory)
 
 if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
   add_library(virtualpostgresql MODULE
@@ -160,6 +297,71 @@ if(BUILD_TESTING)
   target_link_libraries(vps_platform_contract_test PRIVATE vps_platform)
   vps_apply_strict_warnings(vps_platform_contract_test)
   add_test(NAME vps_platform_contract COMMAND vps_platform_contract_test)
+
+  add_executable(vps_memory_test
+    tests/unit/vps_memory_test.c
+  )
+  target_compile_features(vps_memory_test PRIVATE c_std_11)
+  set_target_properties(vps_memory_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_memory_test PRIVATE vps_memory)
+  vps_apply_strict_warnings(vps_memory_test)
+  vps_apply_asan(vps_memory_test)
+  add_test(NAME vps_memory COMMAND vps_memory_test)
+
+  add_executable(vps_error_test
+    tests/unit/vps_error_test.c
+  )
+  target_compile_features(vps_error_test PRIVATE c_std_11)
+  set_target_properties(vps_error_test PROPERTIES C_EXTENSIONS OFF)
+  target_include_directories(vps_error_test PRIVATE
+    "${VPS_SQLITE_AMALGAMATION_DIR}"
+  )
+  target_link_libraries(vps_error_test PRIVATE vps_error)
+  vps_apply_strict_warnings(vps_error_test)
+  vps_apply_asan(vps_error_test)
+  add_test(NAME vps_error COMMAND vps_error_test)
+
+  add_executable(vps_logging_test
+    tests/unit/vps_logging_test.c
+  )
+  target_compile_features(vps_logging_test PRIVATE c_std_11)
+  set_target_properties(vps_logging_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_logging_test PRIVATE vps_logging)
+  vps_apply_strict_warnings(vps_logging_test)
+  vps_apply_asan(vps_logging_test)
+  add_test(NAME vps_logging COMMAND vps_logging_test)
+
+  add_executable(vps_deadline_test
+    tests/unit/vps_deadline_test.c
+  )
+  target_compile_features(vps_deadline_test PRIVATE c_std_11)
+  set_target_properties(vps_deadline_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_deadline_test PRIVATE vps_deadline)
+  vps_apply_strict_warnings(vps_deadline_test)
+  vps_apply_asan(vps_deadline_test)
+  add_test(NAME vps_deadline COMMAND vps_deadline_test)
+
+  add_executable(vps_support_integration_test
+    tests/integration/vps_support_integration_test.c
+  )
+  target_compile_features(vps_support_integration_test PRIVATE c_std_11)
+  set_target_properties(vps_support_integration_test PROPERTIES
+    C_EXTENSIONS OFF
+  )
+  target_compile_definitions(vps_support_integration_test PRIVATE
+    $<$<CONFIG:Release>:VPS_OPTIMIZED_BUILD>
+  )
+  target_include_directories(vps_support_integration_test PRIVATE
+    "${VPS_SQLITE_AMALGAMATION_DIR}"
+  )
+  target_link_libraries(vps_support_integration_test PRIVATE
+    vps_deadline
+    vps_error
+    vps_secure_memory
+  )
+  vps_apply_strict_warnings(vps_support_integration_test)
+  vps_apply_asan(vps_support_integration_test)
+  add_test(NAME vps_support_integration COMMAND vps_support_integration_test)
 
   if(TARGET virtualpostgresql AND
      EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3.c")

@@ -40,12 +40,23 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_C_COMPILER": "clang-cl"
       }
+    },
+    {
+      "name": "clang-cl-x64-asan",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/stage2-clang-cl-x64-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "clang-cl",
+        "VPS_ENABLE_ASAN": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "msvc-x86-debug", "configurePreset": "msvc-x86-debug" },
     { "name": "msvc-x64-release", "configurePreset": "msvc-x64-release" },
-    { "name": "clang-cl-x64-debug", "configurePreset": "clang-cl-x64-debug" }
+    { "name": "clang-cl-x64-debug", "configurePreset": "clang-cl-x64-debug" },
+    { "name": "clang-cl-x64-asan", "configurePreset": "clang-cl-x64-asan" }
   ],
   "testPresets": [
     {
@@ -61,6 +72,11 @@
     {
       "name": "clang-cl-x64-debug",
       "configurePreset": "clang-cl-x64-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "clang-cl-x64-asan",
+      "configurePreset": "clang-cl-x64-asan",
       "output": { "outputOnFailure": true }
     }
   ]
