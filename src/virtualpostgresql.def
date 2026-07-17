@@ -1,0 +1,7 @@
+LIBRARY virtualpostgresql
+EXPORTS
+    sqlite3_virtualpostgresql_init
+    virtualpostgresql_api_version
+    virtualpostgresql_credential_config_structure_size
+    virtualpostgresql_credential_lease_structure_size
+    virtualpostgresql_credential_provider_structure_size

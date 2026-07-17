@@ -36,8 +36,14 @@ $mismatch_manifest.dependencies[0].sha256 = '00000000000000000000000000000000000
 $mismatch_manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $mismatch_manifest_path -Encoding utf8NoBOM
 Invoke-VpsValidator -Case deliberate_hash_mismatch -Arguments @('-ManifestPath', $mismatch_manifest_path, '-DownloadsRoot', $downloads_root, '-RequireArchives', '-SkipToolchain') -ExpectedExitCode 1
 
+$incomplete_manifest_path = Join-Path $test_root 'versions-incomplete.json'
+$incomplete_manifest = Get-Content -LiteralPath $manifest_path -Raw | ConvertFrom-Json
+$incomplete_manifest.dependencies = @($incomplete_manifest.dependencies | Where-Object { $_.name -ne 'SQLite' })
+$incomplete_manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $incomplete_manifest_path -Encoding utf8NoBOM
+Invoke-VpsValidator -Case deliberate_incomplete_dependency_set -Arguments @('-ManifestPath', $incomplete_manifest_path, '-DownloadsRoot', $downloads_root, '-SkipToolchain') -ExpectedExitCode 1
+
 $missing_root = Join-Path $test_root 'missing-archives'
 New-Item -ItemType Directory -Force -Path $missing_root | Out-Null
 Invoke-VpsValidator -Case required_archive_missing -Arguments @('-ManifestPath', $manifest_path, '-DownloadsRoot', $missing_root, '-RequireArchives', '-SkipToolchain') -ExpectedExitCode 1
 
-[Console]::WriteLine('[vps] level=info event=test_suite_complete cases=4')
+[Console]::WriteLine('[vps] level=info event=test_suite_complete cases=5')

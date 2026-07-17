@@ -17,6 +17,12 @@
 **/cmake_install.cmake
 **/CTestTestfile.cmake
 **/Testing/
+**/.ninja_deps
+**/.ninja_log
+**/build.ninja
+**/rules.ninja
+/compile_commands.json
+/CMakeUserPresets.json
 *.obj
 *.o
 *.a

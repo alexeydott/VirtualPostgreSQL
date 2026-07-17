@@ -248,8 +248,16 @@ function Invoke-VpsValidation {
     if ($manifest.schema_version -ne 1) {
         throw "unsupported manifest schema: $($manifest.schema_version)"
     }
-    if (@($manifest.dependencies).Count -ne 3) {
-        throw "expected three pinned dependencies, found=$(@($manifest.dependencies).Count)"
+    $expected_dependencies = @('OpenSSL', 'PostgreSQL', 'SQLite', 'zlib')
+    $actual_dependencies = @($manifest.dependencies | ForEach-Object { [string]$_.name } | Sort-Object -Unique)
+    if (@(Compare-Object -ReferenceObject $expected_dependencies -DifferenceObject $actual_dependencies).Count -ne 0) {
+        throw "pinned dependency set mismatch: expected=$($expected_dependencies.Count) actual=$($actual_dependencies.Count)"
+    }
+    foreach ($dependency in $manifest.dependencies) {
+        if ([string]::IsNullOrWhiteSpace([string]$dependency.license) -or
+            [string]::IsNullOrWhiteSpace([string]$dependency.license_file)) {
+            throw "dependency license metadata is incomplete: name=$($dependency.name)"
+        }
     }
 
     if (-not $SkipToolchain) {

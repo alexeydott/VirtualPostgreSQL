@@ -27,6 +27,16 @@
       "sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
       "license": "Zlib",
       "license_file": "LICENSE"
+    },
+    {
+      "name": "SQLite",
+      "version": "3.53.3",
+      "archive": "sqlite-amalgamation-3530300.zip",
+      "url": "https://sqlite.org/2026/sqlite-amalgamation-3530300.zip",
+      "sha256": "646421e12aac110282ef8cc68f1a62d4bb15fc7b8f09da0b53e29ee690500431",
+      "sha3_256": "d45c688a8cb23f68611a894a756a12d7eb6ab6e9e2468ca70adbeab3808b5ab9",
+      "license": "SQLite Public Domain",
+      "license_file": "sqlite3.h"
     }
   ],
   "toolchain": {

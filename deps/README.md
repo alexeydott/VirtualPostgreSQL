@@ -7,6 +7,7 @@ Stage 0 builds all network dependencies from pinned upstream source archives. Ge
 | PostgreSQL/libpq | 18.4 | `postgresql-18.4.tar.bz2` | `81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094` | PostgreSQL License |
 | OpenSSL LTS | 3.5.7 | `openssl-3.5.7.tar.gz` | `a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8` | Apache-2.0 |
 | zlib | 1.3.2 | `zlib-1.3.2.tar.gz` | `bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16` | Zlib |
+| SQLite amalgamation | 3.53.3 | `sqlite-amalgamation-3530300.zip` | `646421e12aac110282ef8cc68f1a62d4bb15fc7b8f09da0b53e29ee690500431` | Public Domain |
 
 The canonical machine-readable manifest is [`versions.json`](versions.json). URLs are HTTPS upstream release locations; after the first acquisition every build verifies the recorded SHA-256 before extraction.
 
@@ -25,6 +26,7 @@ Validate the host and downloaded archives:
 ```powershell
 pwsh -NoProfile -File scripts/deps/versions.ps1 -RequireArchives
 pwsh -NoProfile -File scripts/deps/test-versions.ps1
+pwsh -NoProfile -File scripts/deps/fetch-sqlite.ps1
 ```
 
 The validation scripts print only tool names, versions, architectures, safe repository-local paths and hashes. They never enumerate the process environment or connection configuration.
