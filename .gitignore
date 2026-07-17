@@ -1,0 +1,45 @@
+# Repository-local dot paths and AI/tool context are private workspace state.
+.*
+!/.gitignore
+!/.gitmodules
+/AGENTS.md
+/CLAUDE.md
+/skills-lock.json
+/VirtualPostgreSQL_Technical_Specification.md
+
+# Build and release outputs.
+/build/
+/dist/
+/out/
+/cmake-build-*/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/CTestTestfile.cmake
+**/Testing/
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.exe
+*.so
+*.dylib
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.lastbuildstate
+*.exp
+
+# Temporary, cache and editor artifacts.
+*~
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
+*.py[cod]
+__pycache__/
