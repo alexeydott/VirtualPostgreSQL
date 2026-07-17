@@ -1,0 +1,4 @@
+credential_ref=seed/ref
+source=table
+schema=public
+table=items

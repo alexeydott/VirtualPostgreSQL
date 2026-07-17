@@ -17,7 +17,8 @@ static int vps_log_event_level_is_valid(VpsLogLevel level)
 
 static int vps_log_field_key_is_valid(VpsLogFieldKey key)
 {
-    return key >= VPS_LOG_FIELD_OPERATION && key <= VPS_LOG_FIELD_SIZE_CLASS;
+    return key >= VPS_LOG_FIELD_OPERATION &&
+           key <= VPS_LOG_FIELD_EXPECTED_CLASS;
 }
 
 static int vps_log_field_requires_string(VpsLogFieldKey key)
@@ -36,6 +37,12 @@ static int vps_log_field_requires_string(VpsLogFieldKey key)
     case VPS_LOG_FIELD_VERSION:
     case VPS_LOG_FIELD_STATUS:
     case VPS_LOG_FIELD_SIZE_CLASS:
+    case VPS_LOG_FIELD_ARGUMENT:
+    case VPS_LOG_FIELD_TLS_MODE:
+    case VPS_LOG_FIELD_CERTIFICATE_STATUS:
+    case VPS_LOG_FIELD_CHANNEL_BINDING_STATUS:
+    case VPS_LOG_FIELD_PARAMETER:
+    case VPS_LOG_FIELD_EXPECTED_CLASS:
         return 1;
     default:
         return 0;
@@ -52,6 +59,11 @@ static int vps_log_field_requires_uint64(VpsLogFieldKey key)
     case VPS_LOG_FIELD_POOL_IDLE:
     case VPS_LOG_FIELD_POOL_WAITING:
     case VPS_LOG_FIELD_PARTICIPANT_COUNT:
+    case VPS_LOG_FIELD_PRESENCE_MASK:
+    case VPS_LOG_FIELD_PROVIDER_ID:
+    case VPS_LOG_FIELD_GENERATION:
+    case VPS_LOG_FIELD_CONFIGURATION_GENERATION:
+    case VPS_LOG_FIELD_SSL_IN_USE:
         return 1;
     default:
         return 0;
@@ -280,7 +292,9 @@ VpsLogResult vps_log_event_add_string(VpsLogEvent *event,
         return VPS_LOG_DUPLICATE_FIELD;
     }
 
-    sensitive = vps_log_value_is_sensitive(value, value_length);
+    sensitive = key == VPS_LOG_FIELD_ARGUMENT
+                    ? 0
+                    : vps_log_value_is_sensitive(value, value_length);
     if (!sensitive && !vps_log_string_matches_key(key, value, value_length,
                                                   0)) {
         return VPS_LOG_MALFORMED_VALUE;
@@ -432,7 +446,11 @@ const char *vps_log_field_name(VpsLogFieldKey key)
         "connection_fingerprint",          "query_fingerprint",
         "pool_active",    "pool_idle",   "pool_waiting",
         "participant_count",               "snapshot_mode",
-        "architecture",   "version",     "status",       "size_class"};
+        "architecture",   "version",     "status",       "size_class",
+        "argument",       "presence_mask", "provider_id", "generation",
+        "configuration_generation", "tls_mode", "ssl_in_use",
+        "certificate_status", "channel_binding_status", "parameter",
+        "expected_class"};
 
     if (!vps_log_field_key_is_valid(key)) {
         return "unknown";

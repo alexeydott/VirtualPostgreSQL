@@ -49,10 +49,17 @@ if (Test-Selected 'FlatSrc') {
 
 if (Test-Selected 'PlatformHeaders') {
     $forbiddenInclude = '(?im)^\s*#\s*include\s*[<"](?:windows\.h|winsock2?\.h|ws2tcpip\.h|bcrypt\.h|unistd\.h|pthread\.h|android/[^>"]+|libpq-fe\.h)[>"]'
+    $platformBoundaryFiles = @(
+        'src/vps_windows.c',
+        'src/vps_wincred_provider.c',
+        'src/vps_libpq_client_conninfo.c',
+        'src/vps_libpq_client_tls.c',
+        'src/vps_libpq_client_session.c'
+    )
     foreach ($file in $files) {
         $relative = Get-VpsRelativePath -Root $rootPath -Path $file
         if ($relative -notmatch '^(include/.*\.(?:h|c)|src/.*\.(?:h|c))$') { continue }
-        if ($relative -eq 'src/vps_windows.c') { continue }
+        if ($relative -in $platformBoundaryFiles) { continue }
         if ((Get-Content -LiteralPath $file -Raw) -match $forbiddenInclude) {
             Add-Failure -Class 'platform_header_leak' -Path $file
         }

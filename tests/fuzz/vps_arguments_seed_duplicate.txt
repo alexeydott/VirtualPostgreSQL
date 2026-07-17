@@ -1,0 +1,4 @@
+profile=seed
+source=query
+query_profile=report
+source=table

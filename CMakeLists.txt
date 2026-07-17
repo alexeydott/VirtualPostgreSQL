@@ -30,6 +30,24 @@ set(VPS_SQLITE_AMALGAMATION_DIR
   CACHE PATH "Directory containing pinned sqlite3.c/sqlite3.h/sqlite3ext.h")
 option(VPS_BUILD_EXTENSION "Build the loadable extension and SQLite host tests" ON)
 option(VPS_ENABLE_ASAN "Enable AddressSanitizer for supported Windows targets" OFF)
+option(VPS_ENABLE_WINCRED "Build the Windows Credential Manager adapter" ON)
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(VPS_DEPENDENCY_ARCH "x64")
+else()
+  set(VPS_DEPENDENCY_ARCH "x86")
+endif()
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(VPS_DEPENDENCY_CONFIG "Debug")
+else()
+  set(VPS_DEPENDENCY_CONFIG "Release")
+endif()
+set(VPS_PINNED_DEPENDENCY_ROOT
+  "${CMAKE_CURRENT_SOURCE_DIR}/build/deps/${VPS_DEPENDENCY_ARCH}/${VPS_DEPENDENCY_CONFIG}")
+set(VPS_LIBPQ_INCLUDE_DIR "${VPS_PINNED_DEPENDENCY_ROOT}/libpq/include")
+set(VPS_LIBPQ_LIBRARY_DIR "${VPS_PINNED_DEPENDENCY_ROOT}/libpq/lib")
+set(VPS_OPENSSL_LIBRARY_DIR "${VPS_PINNED_DEPENDENCY_ROOT}/openssl/lib")
+set(VPS_ZLIB_LIBRARY_DIR "${VPS_PINNED_DEPENDENCY_ROOT}/zlib/lib")
 
 if(VPS_ENABLE_ASAN)
   if(NOT (MSVC AND CMAKE_C_COMPILER_ID MATCHES "Clang"))
@@ -245,6 +263,223 @@ target_link_libraries(vps_secure_memory PUBLIC
 vps_apply_strict_warnings(vps_secure_memory)
 vps_apply_asan(vps_secure_memory)
 
+add_library(vps_arguments STATIC
+  src/vps_arguments.c
+)
+target_compile_features(vps_arguments PUBLIC c_std_11)
+set_target_properties(vps_arguments PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_arguments PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_arguments PUBLIC
+  vps_logging
+  vps_memory
+  vps_platform
+  vps_secure_memory
+)
+vps_apply_strict_warnings(vps_arguments)
+vps_apply_asan(vps_arguments)
+
+add_library(vps_credential_provider STATIC
+  src/vps_credential_provider.c
+)
+target_compile_features(vps_credential_provider PUBLIC c_std_11)
+set_target_properties(vps_credential_provider PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_credential_provider PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_credential_provider PUBLIC
+  vps_abi
+  vps_logging
+  vps_memory
+  vps_platform
+  vps_secure_memory
+)
+vps_apply_strict_warnings(vps_credential_provider)
+vps_apply_asan(vps_credential_provider)
+
+add_library(vps_connection_string STATIC
+  src/vps_connection_string.c
+)
+target_compile_features(vps_connection_string PUBLIC c_std_11)
+set_target_properties(vps_connection_string PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_connection_string PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_connection_string PUBLIC
+  vps_arguments
+  vps_credential_provider
+)
+vps_apply_strict_warnings(vps_connection_string)
+vps_apply_asan(vps_connection_string)
+
+add_library(vps_identity STATIC
+  src/vps_identity.c
+)
+target_compile_features(vps_identity PUBLIC c_std_11)
+set_target_properties(vps_identity PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_identity PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_identity PUBLIC vps_connection_string)
+vps_apply_strict_warnings(vps_identity)
+vps_apply_asan(vps_identity)
+
+add_library(vps_tls_policy STATIC
+  src/vps_tls_policy.c
+)
+target_compile_features(vps_tls_policy PUBLIC c_std_11)
+set_target_properties(vps_tls_policy PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_tls_policy PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_tls_policy PUBLIC vps_logging)
+vps_apply_strict_warnings(vps_tls_policy)
+vps_apply_asan(vps_tls_policy)
+
+add_library(vps_session STATIC
+  src/vps_session.c
+)
+target_compile_features(vps_session PUBLIC c_std_11)
+set_target_properties(vps_session PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_session PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_session PUBLIC
+  vps_connection_string
+  vps_logging
+)
+vps_apply_strict_warnings(vps_session)
+vps_apply_asan(vps_session)
+
+if(EXISTS "${VPS_LIBPQ_INCLUDE_DIR}/libpq-fe.h" AND
+   EXISTS "${VPS_LIBPQ_LIBRARY_DIR}/libpq.lib")
+  add_library(vps_libpq_client_conninfo STATIC
+    src/vps_libpq_client_conninfo.c
+  )
+  target_compile_features(vps_libpq_client_conninfo PUBLIC c_std_11)
+  set_target_properties(vps_libpq_client_conninfo PROPERTIES
+    C_EXTENSIONS OFF
+    POSITION_INDEPENDENT_CODE ON
+  )
+  target_include_directories(vps_libpq_client_conninfo
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+    PRIVATE "${VPS_LIBPQ_INCLUDE_DIR}"
+  )
+  target_link_libraries(vps_libpq_client_conninfo
+    PUBLIC vps_connection_string
+    PRIVATE
+      "${VPS_LIBPQ_LIBRARY_DIR}/libpq.lib"
+      "${VPS_LIBPQ_LIBRARY_DIR}/pgcommon.lib"
+      "${VPS_LIBPQ_LIBRARY_DIR}/pgport.lib"
+      "${VPS_OPENSSL_LIBRARY_DIR}/libssl.lib"
+      "${VPS_OPENSSL_LIBRARY_DIR}/libcrypto.lib"
+      "${VPS_ZLIB_LIBRARY_DIR}/zlib.lib"
+      ws2_32 secur32 crypt32 advapi32 user32 shell32
+  )
+  vps_apply_strict_warnings(vps_libpq_client_conninfo)
+  vps_apply_asan(vps_libpq_client_conninfo)
+
+  add_library(vps_libpq_client_tls STATIC
+    src/vps_libpq_client_tls.c
+  )
+  target_compile_features(vps_libpq_client_tls PUBLIC c_std_11)
+  set_target_properties(vps_libpq_client_tls PROPERTIES
+    C_EXTENSIONS OFF
+    POSITION_INDEPENDENT_CODE ON
+  )
+  target_include_directories(vps_libpq_client_tls
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+    PRIVATE "${VPS_LIBPQ_INCLUDE_DIR}"
+  )
+  target_link_libraries(vps_libpq_client_tls
+    PUBLIC vps_tls_policy
+    PRIVATE
+      "${VPS_LIBPQ_LIBRARY_DIR}/libpq.lib"
+      "${VPS_LIBPQ_LIBRARY_DIR}/pgcommon.lib"
+      "${VPS_LIBPQ_LIBRARY_DIR}/pgport.lib"
+      "${VPS_OPENSSL_LIBRARY_DIR}/libssl.lib"
+      "${VPS_OPENSSL_LIBRARY_DIR}/libcrypto.lib"
+      "${VPS_ZLIB_LIBRARY_DIR}/zlib.lib"
+      ws2_32 secur32 crypt32 advapi32 user32 shell32
+  )
+  vps_apply_strict_warnings(vps_libpq_client_tls)
+  vps_apply_asan(vps_libpq_client_tls)
+
+  add_library(vps_libpq_client_session STATIC
+    src/vps_libpq_client_session.c
+  )
+  target_compile_features(vps_libpq_client_session PUBLIC c_std_11)
+  set_target_properties(vps_libpq_client_session PROPERTIES
+    C_EXTENSIONS OFF
+    POSITION_INDEPENDENT_CODE ON
+  )
+  target_include_directories(vps_libpq_client_session
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+    PRIVATE "${VPS_LIBPQ_INCLUDE_DIR}"
+  )
+  target_link_libraries(vps_libpq_client_session
+    PUBLIC vps_session
+    PRIVATE
+      "${VPS_LIBPQ_LIBRARY_DIR}/libpq.lib"
+      "${VPS_LIBPQ_LIBRARY_DIR}/pgcommon.lib"
+      "${VPS_LIBPQ_LIBRARY_DIR}/pgport.lib"
+      "${VPS_OPENSSL_LIBRARY_DIR}/libssl.lib"
+      "${VPS_OPENSSL_LIBRARY_DIR}/libcrypto.lib"
+      "${VPS_ZLIB_LIBRARY_DIR}/zlib.lib"
+      ws2_32 secur32 crypt32 advapi32 user32 shell32
+  )
+  vps_apply_strict_warnings(vps_libpq_client_session)
+  vps_apply_asan(vps_libpq_client_session)
+else()
+  message(FATAL_ERROR
+    "[libpq] pinned static dependency contour is incomplete: ${VPS_PINNED_DEPENDENCY_ROOT}")
+endif()
+
+if(WIN32 AND VPS_ENABLE_WINCRED)
+  add_library(vps_wincred_provider STATIC
+    src/vps_wincred_provider.c
+  )
+  target_compile_features(vps_wincred_provider PUBLIC c_std_11)
+  set_target_properties(vps_wincred_provider PROPERTIES
+    C_EXTENSIONS OFF
+    POSITION_INDEPENDENT_CODE ON
+  )
+  target_include_directories(vps_wincred_provider PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+  )
+  target_link_libraries(vps_wincred_provider PUBLIC
+    vps_credential_provider
+    PRIVATE advapi32
+  )
+  vps_apply_strict_warnings(vps_wincred_provider)
+  vps_apply_asan(vps_wincred_provider)
+endif()
+
 if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
   add_library(virtualpostgresql MODULE
     src/vps_extension.c
@@ -362,6 +597,146 @@ if(BUILD_TESTING)
   vps_apply_strict_warnings(vps_support_integration_test)
   vps_apply_asan(vps_support_integration_test)
   add_test(NAME vps_support_integration COMMAND vps_support_integration_test)
+
+  add_executable(vps_arguments_test
+    tests/unit/vps_arguments_test.c
+  )
+  target_compile_features(vps_arguments_test PRIVATE c_std_11)
+  set_target_properties(vps_arguments_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_arguments_test PRIVATE vps_arguments)
+  vps_apply_strict_warnings(vps_arguments_test)
+  vps_apply_asan(vps_arguments_test)
+  add_test(NAME vps_arguments COMMAND vps_arguments_test)
+
+  add_executable(vps_credential_provider_test
+    tests/unit/vps_credential_provider_test.c
+  )
+  target_compile_features(vps_credential_provider_test PRIVATE c_std_11)
+  set_target_properties(vps_credential_provider_test PROPERTIES
+    C_EXTENSIONS OFF
+  )
+  target_link_libraries(vps_credential_provider_test PRIVATE
+    vps_credential_provider
+  )
+  vps_apply_strict_warnings(vps_credential_provider_test)
+  vps_apply_asan(vps_credential_provider_test)
+  add_test(NAME vps_credential_provider COMMAND vps_credential_provider_test)
+
+  add_executable(vps_connection_string_test
+    tests/unit/vps_connection_string_test.c
+  )
+  target_compile_features(vps_connection_string_test PRIVATE c_std_11)
+  set_target_properties(vps_connection_string_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_connection_string_test PRIVATE
+    vps_connection_string
+    vps_libpq_client_conninfo
+  )
+  vps_apply_strict_warnings(vps_connection_string_test)
+  vps_apply_asan(vps_connection_string_test)
+  add_test(NAME vps_connection_string COMMAND vps_connection_string_test)
+
+  add_executable(vps_identity_test
+    tests/unit/vps_identity_test.c
+  )
+  target_compile_features(vps_identity_test PRIVATE c_std_11)
+  set_target_properties(vps_identity_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_identity_test PRIVATE vps_identity)
+  vps_apply_strict_warnings(vps_identity_test)
+  vps_apply_asan(vps_identity_test)
+  add_test(NAME vps_identity COMMAND vps_identity_test)
+
+  add_executable(vps_tls_policy_test
+    tests/unit/vps_tls_policy_test.c
+  )
+  target_compile_features(vps_tls_policy_test PRIVATE c_std_11)
+  set_target_properties(vps_tls_policy_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_tls_policy_test PRIVATE vps_tls_policy)
+  vps_apply_strict_warnings(vps_tls_policy_test)
+  vps_apply_asan(vps_tls_policy_test)
+  add_test(NAME vps_tls_policy COMMAND vps_tls_policy_test)
+
+  add_executable(vps_session_test
+    tests/unit/vps_session_test.c
+  )
+  target_compile_features(vps_session_test PRIVATE c_std_11)
+  set_target_properties(vps_session_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_session_test PRIVATE vps_session)
+  vps_apply_strict_warnings(vps_session_test)
+  vps_apply_asan(vps_session_test)
+  add_test(NAME vps_session COMMAND vps_session_test)
+
+  add_executable(vps_libpq_client_tls_integration_test
+    tests/integration/vps_libpq_client_tls_integration_test.c
+  )
+  target_compile_features(vps_libpq_client_tls_integration_test PRIVATE c_std_11)
+  set_target_properties(vps_libpq_client_tls_integration_test PROPERTIES
+    C_EXTENSIONS OFF
+  )
+  target_include_directories(vps_libpq_client_tls_integration_test PRIVATE
+    "${VPS_LIBPQ_INCLUDE_DIR}"
+  )
+  if(MSVC)
+    target_compile_definitions(vps_libpq_client_tls_integration_test PRIVATE
+      _CRT_SECURE_NO_WARNINGS
+    )
+  endif()
+  target_link_libraries(vps_libpq_client_tls_integration_test PRIVATE
+    vps_libpq_client_tls
+  )
+  vps_apply_strict_warnings(vps_libpq_client_tls_integration_test)
+  vps_apply_asan(vps_libpq_client_tls_integration_test)
+  add_test(NAME vps_libpq_client_tls_integration
+    COMMAND vps_libpq_client_tls_integration_test)
+  set_tests_properties(vps_libpq_client_tls_integration PROPERTIES
+    SKIP_RETURN_CODE 77
+    LABELS "tls-integration"
+  )
+
+  add_executable(vps_libpq_client_session_integration_test
+    tests/integration/vps_libpq_client_session_integration_test.c
+  )
+  target_compile_features(vps_libpq_client_session_integration_test PRIVATE
+    c_std_11
+  )
+  set_target_properties(vps_libpq_client_session_integration_test PROPERTIES
+    C_EXTENSIONS OFF
+  )
+  target_include_directories(vps_libpq_client_session_integration_test PRIVATE
+    "${VPS_LIBPQ_INCLUDE_DIR}"
+  )
+  if(MSVC)
+    target_compile_definitions(
+      vps_libpq_client_session_integration_test PRIVATE
+      _CRT_SECURE_NO_WARNINGS
+    )
+  endif()
+  target_link_libraries(vps_libpq_client_session_integration_test PRIVATE
+    vps_libpq_client_session
+  )
+  vps_apply_strict_warnings(vps_libpq_client_session_integration_test)
+  vps_apply_asan(vps_libpq_client_session_integration_test)
+  add_test(NAME vps_libpq_client_session_integration
+    COMMAND vps_libpq_client_session_integration_test)
+  set_tests_properties(vps_libpq_client_session_integration PROPERTIES
+    SKIP_RETURN_CODE 77
+    LABELS "session-integration"
+  )
+
+  if(TARGET vps_wincred_provider)
+    add_executable(vps_wincred_provider_test
+      tests/unit/vps_wincred_provider_test.c
+    )
+    target_compile_features(vps_wincred_provider_test PRIVATE c_std_11)
+    set_target_properties(vps_wincred_provider_test PROPERTIES
+      C_EXTENSIONS OFF
+    )
+    target_link_libraries(vps_wincred_provider_test PRIVATE
+      vps_wincred_provider
+    )
+    vps_apply_strict_warnings(vps_wincred_provider_test)
+    vps_apply_asan(vps_wincred_provider_test)
+    add_test(NAME vps_wincred_provider COMMAND vps_wincred_provider_test)
+  endif()
 
   if(TARGET virtualpostgresql AND
      EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3.c")

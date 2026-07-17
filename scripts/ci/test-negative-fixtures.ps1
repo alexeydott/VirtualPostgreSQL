@@ -62,3 +62,4 @@ try {
 }
 
 Write-VpsCiEvent -Gate $gate -Level info -Status passed -Detail 'fixtures=6'
+exit 0

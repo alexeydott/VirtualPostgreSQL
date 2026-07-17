@@ -1,0 +1,4 @@
+service='seed''service'
+source=table
+schema='public'
+table='quoted''table'

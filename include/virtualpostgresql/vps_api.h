@@ -41,6 +41,36 @@ extern "C" {
 
 typedef uint64_t VpsCredentialFields;
 
+/* Provider callbacks return one of these stable int32 status values. */
+#define VPS_CREDENTIAL_PROVIDER_OK INT32_C(0)
+#define VPS_CREDENTIAL_PROVIDER_NOT_FOUND INT32_C(1)
+#define VPS_CREDENTIAL_PROVIDER_UNAVAILABLE INT32_C(2)
+#define VPS_CREDENTIAL_PROVIDER_INVALID_REFERENCE INT32_C(3)
+#define VPS_CREDENTIAL_PROVIDER_ERROR INT32_C(4)
+
+/*
+ * present_fields bits for VpsCredentialProvider. A zero mask is accepted as
+ * the legacy 1.0 prefix; non-zero masks must advertise required callbacks.
+ */
+#define VPS_CREDENTIAL_PROVIDER_FIELD_RESOLVE  (UINT64_C(1) << 0)
+#define VPS_CREDENTIAL_PROVIDER_FIELD_RELEASE  (UINT64_C(1) << 1)
+#define VPS_CREDENTIAL_PROVIDER_FIELD_CONTEXT  (UINT64_C(1) << 2)
+#define VPS_CREDENTIAL_PROVIDER_FIELDS_CURRENT \
+  (VPS_CREDENTIAL_PROVIDER_FIELD_RESOLVE | \
+   VPS_CREDENTIAL_PROVIDER_FIELD_RELEASE | \
+   VPS_CREDENTIAL_PROVIDER_FIELD_CONTEXT)
+
+/* present_fields bits for VpsCredentialLease. */
+#define VPS_CREDENTIAL_LEASE_FIELD_CONFIG         (UINT64_C(1) << 0)
+#define VPS_CREDENTIAL_LEASE_FIELD_PROVIDER_LEASE (UINT64_C(1) << 1)
+#define VPS_CREDENTIAL_LEASE_FIELDS_CURRENT \
+  (VPS_CREDENTIAL_LEASE_FIELD_CONFIG | \
+   VPS_CREDENTIAL_LEASE_FIELD_PROVIDER_LEASE)
+
+/* Byte limits; credential_ref is length-delimited, config values exclude NUL. */
+#define VPS_CREDENTIAL_REFERENCE_MAX_LENGTH UINT32_C(1024)
+#define VPS_CREDENTIAL_VALUE_MAX_LENGTH UINT32_C(4096)
+
 #define VPS_CREDENTIAL_FIELD_HOSTS                (UINT64_C(1) << 0)
 #define VPS_CREDENTIAL_FIELD_PORTS                (UINT64_C(1) << 1)
 #define VPS_CREDENTIAL_FIELD_USER                 (UINT64_C(1) << 2)
@@ -60,6 +90,20 @@ typedef uint64_t VpsCredentialFields;
 #define VPS_CREDENTIAL_FIELD_LOCK_TIMEOUT         (UINT64_C(1) << 16)
 #define VPS_CREDENTIAL_FIELD_APPLICATION_NAME     (UINT64_C(1) << 17)
 #define VPS_CREDENTIAL_FIELD_SEARCH_PATH          (UINT64_C(1) << 18)
+#define VPS_CREDENTIAL_FIELDS_CURRENT \
+  (VPS_CREDENTIAL_FIELD_HOSTS | VPS_CREDENTIAL_FIELD_PORTS | \
+   VPS_CREDENTIAL_FIELD_USER | VPS_CREDENTIAL_FIELD_PASSWORD | \
+   VPS_CREDENTIAL_FIELD_DBNAME | VPS_CREDENTIAL_FIELD_SERVICE | \
+   VPS_CREDENTIAL_FIELD_SERVICE_FILE | VPS_CREDENTIAL_FIELD_SSLMODE | \
+   VPS_CREDENTIAL_FIELD_SSLROOTCERT | VPS_CREDENTIAL_FIELD_SSLCERT | \
+   VPS_CREDENTIAL_FIELD_SSLKEY | VPS_CREDENTIAL_FIELD_SSLCRL | \
+   VPS_CREDENTIAL_FIELD_CHANNEL_BINDING | \
+   VPS_CREDENTIAL_FIELD_TARGET_SESSION_ATTRS | \
+   VPS_CREDENTIAL_FIELD_CONNECT_TIMEOUT | \
+   VPS_CREDENTIAL_FIELD_STATEMENT_TIMEOUT | \
+   VPS_CREDENTIAL_FIELD_LOCK_TIMEOUT | \
+   VPS_CREDENTIAL_FIELD_APPLICATION_NAME | \
+   VPS_CREDENTIAL_FIELD_SEARCH_PATH)
 
 typedef struct VpsAbiHeader {
     uint32_t structure_size;
@@ -109,6 +153,11 @@ typedef int32_t(VPS_CALL *VpsCredentialResolveFn)(
     uint32_t credential_ref_length,
     VpsCredentialLease *lease);
 
+/*
+ * A successful resolve transfers one provider-owned lease to the caller.
+ * The matching release callback is invoked exactly once after checked copy,
+ * including when that copy or subsequent validation fails.
+ */
 typedef void(VPS_CALL *VpsCredentialReleaseFn)(
     void *provider_context,
     VpsCredentialLease *lease);
