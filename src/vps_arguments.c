@@ -40,6 +40,7 @@ static const VpsArgumentDefinition vps_argument_definitions[] = {
     {"pool_reset", VPS_ARGUMENT_TYPE_ENUM, 16U, 0},
     {"pool_readonly_separate", VPS_ARGUMENT_TYPE_BOOLEAN, 5U, 0},
     {"metadata_mode", VPS_ARGUMENT_TYPE_ENUM, 8U, 0},
+    {"schema_policy", VPS_ARGUMENT_TYPE_ENUM, 8U, 0},
     {"query_indexes", VPS_ARGUMENT_TYPE_STRING, 8192U, 0},
     {"query_materialization", VPS_ARGUMENT_TYPE_ENUM, 6U, 0},
     {"isolation", VPS_ARGUMENT_TYPE_ENUM, 16U, 0},
@@ -292,6 +293,15 @@ static int vps_argument_parse_enum(VpsArgumentId argument_id,
         }
         if (length == 6U && memcmp(value, "cached", 6U) == 0) {
             *parsed = VPS_ARGUMENT_ENUM_METADATA_CACHED;
+            return 1;
+        }
+    } else if (argument_id == VPS_ARGUMENT_ID_SCHEMA_POLICY) {
+        if (length == 6U && memcmp(value, "strict", 6U) == 0) {
+            *parsed = VPS_ARGUMENT_ENUM_SCHEMA_STRICT;
+            return 1;
+        }
+        if (length == 7U && memcmp(value, "refresh", 7U) == 0) {
+            *parsed = VPS_ARGUMENT_ENUM_SCHEMA_REFRESH;
             return 1;
         }
     } else if (argument_id == VPS_ARGUMENT_ID_QUERY_MATERIALIZATION) {

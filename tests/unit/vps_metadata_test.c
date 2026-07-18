@@ -49,10 +49,12 @@ static int test_query_specs(void)
                        VPS_METADATA_OK &&
                        spec.sql != NULL && spec.sql_length == strlen(spec.sql) &&
                        strstr(spec.sql, "pg_catalog.pg_") != NULL &&
-                       strstr(spec.sql, " WHERE ") != NULL &&
-                       strstr(spec.sql, "$1::pg_catalog.") != NULL &&
+                       (query == VPS_CATALOG_QUERY_EXTENSIONS_FUNCTION ||
+                        (strstr(spec.sql, " WHERE ") != NULL &&
+                         strstr(spec.sql, "$1::pg_catalog.") != NULL)) &&
                        strstr(spec.sql, " information_schema.") == NULL &&
-                       spec.parameter_count >= 1U &&
+                       (query == VPS_CATALOG_QUERY_EXTENSIONS_FUNCTION ||
+                        spec.parameter_count >= 1U) &&
                        spec.result_field_count >= 1U,
                    vps_catalog_query_name(query));
     }

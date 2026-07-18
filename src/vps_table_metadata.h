@@ -27,6 +27,13 @@ VpsMetadataResult vps_table_metadata_load(
     size_t relation_length,
     VpsLogger *logger,
     VpsError *error);
+VpsClientStatus vps_catalog_metadata_fetch(
+    VpsClientConnection *connection,
+    VpsCatalogQuery query,
+    const VpsClientParameterView *parameters,
+    size_t parameter_count,
+    VpsMetadataRowSet *rowset,
+    VpsError *error);
 void vps_table_metadata_reset(VpsTableMetadata *metadata);
 
 #endif

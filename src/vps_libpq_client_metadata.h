@@ -6,7 +6,7 @@
 
 typedef struct VpsLibpqMetadataStatement {
     VpsClientStatementSpec statement;
-    VpsClientParameterView parameters[2];
+    VpsClientParameterView parameters[3];
     VpsClientResultFieldExpectation result_fields[VPS_METADATA_MAX_FIELDS];
 } VpsLibpqMetadataStatement;
 

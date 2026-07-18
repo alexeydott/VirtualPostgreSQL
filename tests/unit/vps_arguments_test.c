@@ -119,6 +119,7 @@ static int test_valid_table_and_types(void)
         INPUT_LITERAL("pool_reset=strict_reset"),
         INPUT_LITERAL("pool_readonly_separate=false"),
         INPUT_LITERAL("metadata_mode=cached"),
+        INPUT_LITERAL("schema_policy=refresh"),
         INPUT_LITERAL("isolation=serializable"),
         INPUT_LITERAL("transaction_read_only=true")};
     TestPlatformState platform_state;
@@ -159,6 +160,10 @@ static int test_valid_table_and_types(void)
                    value->enum_value ==
                        VPS_ARGUMENT_ENUM_ISOLATION_SERIALIZABLE,
                "transaction_isolation");
+    value = vps_arguments_get(&arguments, VPS_ARGUMENT_ID_SCHEMA_POLICY);
+    TEST_CHECK(value != NULL &&
+                   value->enum_value == VPS_ARGUMENT_ENUM_SCHEMA_REFRESH,
+               "schema_policy");
     value = vps_arguments_get(&arguments,
                               VPS_ARGUMENT_ID_TRANSACTION_READ_ONLY);
     TEST_CHECK(value != NULL && value->boolean_value,

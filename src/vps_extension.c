@@ -78,11 +78,11 @@ static void vps_capabilities_sql(sqlite3_context *context,
     (void)arguments;
 #if defined(VPS_ENABLE_QUERY_MATERIALIZATION)
     sqlite3_result_text(context,
-                        "read-write,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,query-materialization-memory,query-materialization-temp,keyed-dml,transactions,savepoints,metadata-placeholders", -1,
+                        "read-write,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,query-materialization-memory,query-materialization-temp,keyed-dml,transactions,savepoints,metadata-functions,metadata-cache", -1,
                         SQLITE_STATIC);
 #else
     sqlite3_result_text(context,
-                        "read-write,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,keyed-dml,transactions,savepoints,metadata-placeholders", -1,
+                        "read-write,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,keyed-dml,transactions,savepoints,metadata-functions,metadata-cache", -1,
                         SQLITE_STATIC);
 #endif
 }
@@ -160,6 +160,13 @@ int sqlite3_virtualpostgresql_init(sqlite3 *database,
         return result;
     }
     result = sqlite3_create_module_v2(database,
+                                      "virtualpostgresql_relations",
+                                      &VPS_METADATA_MODULE, module_context,
+                                      NULL);
+    if (result != SQLITE_OK) {
+        return result;
+    }
+    result = sqlite3_create_module_v2(database,
                                       "virtualpostgresql_table_info",
                                       &VPS_METADATA_MODULE, module_context,
                                       NULL);
@@ -175,6 +182,16 @@ int sqlite3_virtualpostgresql_init(sqlite3 *database,
     }
     result = sqlite3_create_module_v2(database,
                                       "virtualpostgresql_index_info",
+                                      &VPS_METADATA_MODULE, module_context,
+                                      NULL);
+    if (result != SQLITE_OK) return result;
+    result = sqlite3_create_module_v2(database,
+                                      "virtualpostgresql_type_info",
+                                      &VPS_METADATA_MODULE, module_context,
+                                      NULL);
+    if (result != SQLITE_OK) return result;
+    result = sqlite3_create_module_v2(database,
+                                      "virtualpostgresql_extensions",
                                       &VPS_METADATA_MODULE, module_context,
                                       NULL);
     if (result != SQLITE_OK) return result;

@@ -129,6 +129,25 @@ static int vps_query_contains(sqlite3 *database,
     return passed;
 }
 
+static int vps_query_first_column_contains(sqlite3 *database,
+                                           const char *sql,
+                                           const char *expected)
+{
+    sqlite3_stmt *statement = NULL;
+    int found = 0;
+    if (sqlite3_prepare_v2(database, sql, -1, &statement, NULL) != SQLITE_OK)
+        return 0;
+    while (sqlite3_step(statement) == SQLITE_ROW) {
+        const unsigned char *value = sqlite3_column_text(statement, 0);
+        if (value != NULL && strstr((const char *)value, expected) != NULL) {
+            found = 1;
+            break;
+        }
+    }
+    (void)sqlite3_finalize(statement);
+    return found;
+}
+
 static int vps_environment_enabled(const char *name)
 {
 #if defined(_WIN32)
@@ -266,6 +285,48 @@ static int vps_runtime_contour(sqlite3 *database,
     if (sql == NULL) return 0;
     passed &= vps_exec_expect(database, sql);
     sqlite3_free(sql);
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST((SELECT count(*) FROM temp.vps_table_vps_schema)=1 "
+        "AND (SELECT count(*) FROM temp.vps_table_vps_metadata)=1 AS TEXT)",
+        "1");
+    sql = sqlite3_mprintf(
+        "SELECT CAST(count(*)>0 AS TEXT) FROM "
+        "virtualpostgresql_relations(%Q,'pg_catalog')", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_expect(vps_query_text(database, sql, "1"),
+                         "metadata-relations", database); sqlite3_free(sql);
+    sql = sqlite3_mprintf(
+        "SELECT CAST(count(*)>0 AS TEXT) FROM "
+        "virtualpostgresql_table_info(%Q,'pg_catalog','pg_type')", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_expect(vps_query_text(database, sql, "1"),
+                         "metadata-table-info", database); sqlite3_free(sql);
+    sql = sqlite3_mprintf(
+        "SELECT CAST(count(*)>0 AS TEXT) FROM "
+        "virtualpostgresql_index_list(%Q,'pg_catalog','pg_type')", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_expect(vps_query_text(database, sql, "1"),
+                         "metadata-index-list", database); sqlite3_free(sql);
+    sql = sqlite3_mprintf(
+        "SELECT CAST(count(*)>0 AS TEXT) FROM "
+        "virtualpostgresql_index_info(%Q,'pg_catalog','pg_type','pg_type_oid_index')",
+        connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_expect(vps_query_text(database, sql, "1"),
+                         "metadata-index-info", database); sqlite3_free(sql);
+    sql = sqlite3_mprintf(
+        "SELECT CAST(count(*)=1 AS TEXT) FROM "
+        "virtualpostgresql_type_info(%Q,'pg_catalog','int4')", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_expect(vps_query_text(database, sql, "1"),
+                         "metadata-type-info", database); sqlite3_free(sql);
+    sql = sqlite3_mprintf(
+        "SELECT CAST(count(*)>0 AS TEXT) FROM "
+        "virtualpostgresql_extensions(%Q)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_expect(vps_query_text(database, sql, "1"),
+                         "metadata-extensions", database); sqlite3_free(sql);
     sql = sqlite3_mprintf(
         "CREATE VIRTUAL TABLE temp.vps_view USING VirtualPostgreSQL("
         "connstr=%Q,source=table,schema=pg_catalog,table=pg_views,mode=ro)",
@@ -503,6 +564,47 @@ static int vps_runtime_contour(sqlite3 *database,
 #endif
     if (vps_environment_enabled("VPS_VTAB_TEST_BULK"))
         passed &= vps_runtime_bulk_contour(database, connstr);
+    passed &= vps_exec_expect(
+        database,
+        "CREATE TEMP TABLE vps_shadow_backup AS SELECT * FROM "
+        "temp.vps_table_vps_schema");
+    passed &= vps_exec_expect(
+        database,
+        "UPDATE temp.vps_table_vps_schema SET source_fingerprint='tampered'");
+    passed &= vps_expect(
+        vps_query_first_column_contains(database, "PRAGMA integrity_check",
+                                        "shadow metadata is inconsistent"),
+        "metadata-integrity-schema-tamper", database);
+    passed &= vps_exec_expect(
+        database,
+        "DELETE FROM temp.vps_table_vps_schema;INSERT INTO "
+        "temp.vps_table_vps_schema SELECT * FROM temp.vps_shadow_backup;");
+    passed &= vps_exec_expect(
+        database,
+        "INSERT INTO temp.vps_table_vps_schema SELECT * FROM "
+        "temp.vps_shadow_backup");
+    passed &= vps_expect(
+        vps_query_first_column_contains(database, "PRAGMA integrity_check",
+                                        "shadow metadata is inconsistent"),
+        "metadata-integrity-row-count", database);
+    passed &= vps_exec_expect(
+        database,
+        "DELETE FROM temp.vps_table_vps_schema WHERE rowid NOT IN "
+        "(SELECT min(rowid) FROM temp.vps_table_vps_schema);"
+        "DROP TABLE temp.vps_shadow_backup");
+    passed &= vps_exec_expect(
+        database,
+        "UPDATE temp.vps_table_vps_metadata SET snapshot=x'56505331'");
+    passed &= vps_expect(
+        vps_query_first_column_contains(database, "PRAGMA integrity_check",
+                                        "shadow metadata is inconsistent"),
+        "metadata-integrity-tamper", database);
+    passed &= vps_exec_expect(database, "DROP TABLE temp.vps_table");
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST(count(*)=0 AS TEXT) FROM temp.sqlite_schema "
+        "WHERE name IN ('vps_table_vps_schema','vps_table_vps_metadata')",
+        "1");
     return passed;
 }
 
@@ -915,9 +1017,27 @@ int main(int argument_count, char **arguments)
             database,
             "SELECT CAST(instr(virtualpostgresql_capabilities(), 'planner') > 0 AS TEXT)",
             "1");
+        passed &= vps_query_text(
+            database,
+            "SELECT CAST(instr(virtualpostgresql_capabilities(), "
+            "'metadata-functions') > 0 AND "
+            "instr(virtualpostgresql_capabilities(), 'metadata-cache') > 0 "
+            "AS TEXT)", "1");
+        passed &= vps_query_text(
+            database,
+            "SELECT CAST(count(*)=28 AND sum(hidden)=3 AS TEXT) FROM "
+            "pragma_table_xinfo('virtualpostgresql_table_info')", "1");
         passed &= vps_exec_expect(
             database,
-            "SELECT count(*) FROM virtualpostgresql_table_info");
+            "CREATE VIEW temp.vps_metadata_unsafe AS SELECT * FROM "
+            "virtualpostgresql_extensions('not-a-connection')");
+        passed &= vps_exec_expect_failure(
+            database, "SELECT * FROM temp.vps_metadata_unsafe", SQLITE_AUTH);
+        passed &= vps_exec_expect(database, "DROP VIEW temp.vps_metadata_unsafe");
+        passed &= vps_exec_expect_failure(
+            database,
+            "SELECT count(*) FROM virtualpostgresql_table_info",
+            SQLITE_CONSTRAINT);
         result = sqlite3_exec(
             database,
             "CREATE VIRTUAL TABLE temp.vps_missing USING VirtualPostgreSQL",

@@ -45,6 +45,7 @@ variables and do not read table rows. Product TLS policy remains
 | [Connection credentials](docs/connection-credentials.md) | Credential modes, TLS and session baseline |
 | [Client runtime](docs/client-runtime.md) | Async libpq capabilities and diagnostics |
 | [Table metadata](docs/table-metadata.md) | Catalog snapshots, keys and fingerprints |
+| [Metadata functions and cache](docs/metadata-functions-cache.md) | Catalog TVFs, shadow snapshots, drift and integrity |
 | [Query sources](docs/query-sources.md) | Bounded query admission and read-only boundary |
 | [Read-only virtual table](docs/read-only-vtable.md) | SQLite callbacks, codecs, streaming and row identity |
 | [DML and stable identity](docs/dml-identity.md) | Keyed INSERT/UPDATE/DELETE, defaults and optimistic locking |

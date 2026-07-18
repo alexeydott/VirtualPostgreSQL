@@ -10,6 +10,7 @@ SQLITE_EXTENSION_INIT3
 #include "vps_identity.h"
 #include "vps_libpq_client.h"
 #include "vps_libpq_client_conninfo.h"
+#include "vps_metadata_cache.h"
 #include "vps_planner.h"
 #include "vps_query_validation.h"
 #include "vps_query_metadata.h"
@@ -31,7 +32,9 @@ SQLITE_EXTENSION_INIT3
 #endif
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define VPS_VTAB_QUERY_LIMIT (1024U * 1024U)
@@ -105,6 +108,11 @@ typedef struct VpsTable {
     int initialized_pool;
     int initialized_described;
     int initialized_query;
+    char *shadow_schema;
+    char *shadow_name;
+    int metadata_cached;
+    int schema_refresh;
+    int cache_fallback;
 } VpsTable;
 
 typedef struct VpsCursor {
@@ -146,11 +154,34 @@ typedef struct VpsCursor {
 #endif
 } VpsCursor;
 
-typedef struct VpsEmptyTable { sqlite3_vtab base; } VpsEmptyTable;
-typedef struct VpsEmptyCursor {
+typedef enum VpsMetadataFunctionKind {
+    VPS_METADATA_FUNCTION_RELATIONS = 0,
+    VPS_METADATA_FUNCTION_TABLE_INFO = 1,
+    VPS_METADATA_FUNCTION_INDEX_LIST = 2,
+    VPS_METADATA_FUNCTION_INDEX_INFO = 3,
+    VPS_METADATA_FUNCTION_TYPE_INFO = 4,
+    VPS_METADATA_FUNCTION_EXTENSIONS = 5
+} VpsMetadataFunctionKind;
+
+typedef struct VpsMetadataTable {
+    sqlite3_vtab base;
+    sqlite3 *database;
+    VpsModuleContext *module_context;
+    VpsMetadataFunctionKind kind;
+    VpsCatalogQuery query;
+    size_t visible_count;
+    size_t hidden_count;
+} VpsMetadataTable;
+
+typedef struct VpsMetadataCursor {
     sqlite3_vtab_cursor base;
-    int is_eof;
-} VpsEmptyCursor;
+    VpsMetadataTable *table;
+    VpsTable *runtime;
+    VpsConnectionLease lease;
+    VpsMetadataRowSet rows;
+    size_t row;
+    int initialized_rows;
+} VpsMetadataCursor;
 
 static VpsConnectionPoolResult vps_vtab_pool_create(void *context,
                                                      void **connection_out);
@@ -752,6 +783,8 @@ static int vps_table_cleanup(VpsTable *table)
 #endif
     if (table->initialized_arguments &&
         vps_arguments_reset(&table->arguments) != VPS_ARGUMENTS_OK) clean = 0;
+    sqlite3_free(table->shadow_schema);
+    sqlite3_free(table->shadow_name);
     if (table->module_context != NULL &&
         table->module_context->table_references != 0U)
         table->module_context->table_references -= 1U;
@@ -798,6 +831,18 @@ static int vps_table_initialize_runtime(VpsTable *table,
     mode = vps_arguments_get(&table->arguments, VPS_ARGUMENT_ID_MODE);
     table->mode_rw = mode != NULL && mode->present &&
                      mode->enum_value == VPS_ARGUMENT_ENUM_MODE_RW;
+    {
+        const VpsArgumentValue *metadata_mode = vps_arguments_get(
+            &table->arguments, VPS_ARGUMENT_ID_METADATA_MODE);
+        const VpsArgumentValue *schema_policy = vps_arguments_get(
+            &table->arguments, VPS_ARGUMENT_ID_SCHEMA_POLICY);
+        table->metadata_cached = metadata_mode != NULL &&
+            metadata_mode->present && metadata_mode->enum_value ==
+                VPS_ARGUMENT_ENUM_METADATA_CACHED;
+        table->schema_refresh = schema_policy != NULL &&
+            schema_policy->present && schema_policy->enum_value ==
+                VPS_ARGUMENT_ENUM_SCHEMA_REFRESH;
+    }
     {
         const VpsArgumentValue *isolation = vps_arguments_get(
             &table->arguments, VPS_ARGUMENT_ID_ISOLATION);
@@ -1381,14 +1426,417 @@ static uint64_t vps_vtab_source_fingerprint(const VpsTable *table)
     return hash;
 }
 
-static int vps_module_connect(sqlite3 *database,
-                              void *auxiliary,
-                              int argument_count,
-                              const char *const *arguments,
-                              sqlite3_vtab **table_out,
-                              char **error_out)
+static void vps_table_description_reset(VpsTable *table)
+{
+    if (table->initialized_described) {
+        vps_query_describe_result_cleanup(&table->described);
+        table->initialized_described = 0;
+    }
+    if (table->initialized_table_metadata) {
+        vps_table_metadata_reset(&table->table_metadata);
+        table->initialized_table_metadata = 0;
+    }
+    if (table->initialized_spatial) {
+        vps_spatial_capabilities_reset(&table->spatial);
+        table->initialized_spatial = 0;
+    }
+    vps_memory_release(&table->allocator, (void **)&table->expected_fields,
+                       table->expected_fields_size);
+    table->expected_fields_size = 0U;
+    table->visible_field_count = 0U;
+    table->key_column_count = 0U;
+    (void)memset(table->spatial_kind, 0, sizeof(table->spatial_kind));
+    (void)memset(table->spatial_type, 0, sizeof(table->spatial_type));
+    (void)memset(table->spatial_dimensions, 0,
+                 sizeof(table->spatial_dimensions));
+    (void)memset(table->spatial_srid, 0, sizeof(table->spatial_srid));
+}
+
+static void vps_snapshot_hash_bytes(uint64_t *hash,
+                                    const void *bytes,
+                                    size_t size)
+{
+    const unsigned char *value = (const unsigned char *)bytes;
+    size_t index;
+    for (index = 0U; index < size; ++index) {
+        *hash ^= value[index];
+        *hash *= UINT64_C(1099511628211);
+    }
+}
+
+static void vps_snapshot_hash_u64(uint64_t *hash, uint64_t value)
+{
+    unsigned char bytes[8];
+    size_t index;
+    for (index = 0U; index < sizeof(bytes); ++index)
+        bytes[index] = (unsigned char)(value >> (index * 8U));
+    vps_snapshot_hash_bytes(hash, bytes, sizeof(bytes));
+}
+
+static int vps_table_snapshot_build(const VpsTable *table,
+                                    VpsMetadataSnapshot *snapshot)
+{
+    size_t index;
+    const char *identity_fingerprint;
+    uint64_t identity_hash = UINT64_C(1469598103934665603);
+    if (vps_metadata_snapshot_init(snapshot, &table->allocator) !=
+            VPS_METADATA_CACHE_OK)
+        return SQLITE_NOMEM;
+    snapshot->visible_count = table->visible_field_count;
+    snapshot->source_fingerprint = table->source_fingerprint;
+    snapshot->layout_fingerprint = vps_vtab_source_fingerprint(table);
+    snapshot->configuration_generation =
+        table->identity.configuration_generation;
+    if (vps_platform_monotonic_now_ms(vps_platform_current_operations(),
+                                      &snapshot->captured_at_ms) ==
+        VPS_PLATFORM_OK)
+        snapshot->validated_at_ms = snapshot->captured_at_ms;
+    identity_fingerprint = vps_identity_fingerprint(&table->identity);
+    if (identity_fingerprint != NULL) {
+        for (index = 0U; identity_fingerprint[index] != '\0'; ++index) {
+            identity_hash ^= (unsigned char)identity_fingerprint[index];
+            identity_hash *= UINT64_C(1099511628211);
+        }
+    }
+    snapshot->connection_identity_hash = identity_hash;
+    snapshot->relation_oid = table->initialized_table_metadata
+        ? table->table_metadata.relation.relation_oid
+        : (table->described.field_count != 0U
+               ? table->described.fields[0].origin_relation_oid : 0U);
+    snapshot->relation_policy_fingerprint =
+        UINT64_C(1469598103934665603);
+    if (table->initialized_table_metadata) {
+        const VpsRelationMetadata *relation = &table->table_metadata.relation;
+        const VpsRelationPolicyMetadata *policy = &table->table_metadata.policy;
+        vps_snapshot_hash_u64(&snapshot->relation_policy_fingerprint,
+                              (uint64_t)relation->kind);
+        vps_snapshot_hash_u64(&snapshot->relation_policy_fingerprint,
+                              (unsigned char)relation->persistence);
+        vps_snapshot_hash_u64(&snapshot->relation_policy_fingerprint,
+                              (uint64_t)relation->is_partition);
+        vps_snapshot_hash_u64(&snapshot->relation_policy_fingerprint,
+                              (uint64_t)relation->row_security);
+        vps_snapshot_hash_u64(&snapshot->relation_policy_fingerprint,
+                              (uint64_t)relation->force_row_security);
+        vps_snapshot_hash_u64(&snapshot->relation_policy_fingerprint,
+                              (uint64_t)policy->write_policy);
+        for (index = 0U; index < policy->parent_count; ++index)
+            vps_snapshot_hash_u64(&snapshot->relation_policy_fingerprint,
+                                  policy->parent_oids[index]);
+        for (index = 0U; index < policy->partition_attribute_count; ++index)
+            vps_snapshot_hash_u64(
+                &snapshot->relation_policy_fingerprint,
+                (uint32_t)policy->partition_attribute_numbers[index]);
+    }
+    snapshot->spatial_namespace_oid = table->spatial.namespace_oid;
+    snapshot->spatial_geometry_oid = table->spatial.geometry_oid;
+    snapshot->spatial_geography_oid = table->spatial.geography_oid;
+    snapshot->spatial_flags = table->spatial.flags;
+    snapshot->spatial_format = (uint32_t)table->spatial_format;
+    snapshot->key_count = table->key_column_count;
+    for (index = 0U; index < table->key_column_count; ++index)
+        snapshot->key_columns[index] = table->key_columns[index];
+    for (index = 0U; index < table->described.field_count; ++index) {
+        const VpsQueryDescribeField *source = &table->described.fields[index];
+        VpsMetadataCacheField field;
+        (void)memset(&field, 0, sizeof(field));
+        field.type_oid = source->type_oid;
+        field.type_modifier = source->type_modifier;
+        field.origin_relation_oid = source->origin_relation_oid;
+        field.origin_attribute_number = source->origin_attribute_number;
+        field.spatial_kind = table->spatial_kind[index];
+        field.spatial_type = (uint8_t)table->spatial_type[index];
+        field.spatial_dimensions = (uint8_t)table->spatial_dimensions[index];
+        field.spatial_srid = table->spatial_srid[index];
+        field.policy_fingerprint = UINT64_C(1469598103934665603);
+        if (table->initialized_table_metadata &&
+            source->origin_relation_oid ==
+                table->table_metadata.relation.relation_oid) {
+            size_t metadata_index;
+            for (metadata_index = 0U;
+                 metadata_index < table->table_metadata.columns.column_count;
+                 ++metadata_index) {
+                const VpsColumnMetadata *column =
+                    &table->table_metadata.columns.columns[metadata_index];
+                const VpsMetadataString *strings[4];
+                size_t string_index;
+                if (column->attribute_number !=
+                    source->origin_attribute_number) continue;
+                field.collation_oid = column->collation_oid;
+                vps_snapshot_hash_u64(&field.policy_fingerprint,
+                                      (uint64_t)column->not_null);
+                vps_snapshot_hash_u64(&field.policy_fingerprint,
+                                      (uint64_t)column->has_default);
+                vps_snapshot_hash_u64(&field.policy_fingerprint,
+                                      (unsigned char)column->generated_kind);
+                vps_snapshot_hash_u64(&field.policy_fingerprint,
+                                      (unsigned char)column->identity_kind);
+                vps_snapshot_hash_u64(&field.policy_fingerprint,
+                                      (unsigned char)column->storage_kind);
+                vps_snapshot_hash_u64(&field.policy_fingerprint,
+                                      (unsigned char)column->compression_kind);
+                vps_snapshot_hash_u64(&field.policy_fingerprint,
+                                      (uint64_t)column->domain_not_null);
+                strings[0] = &column->default_expression_hash;
+                strings[1] = &column->domain_default_hash;
+                strings[2] = &column->domain_constraint_hash;
+                strings[3] = &column->formatted_type;
+                for (string_index = 0U; string_index < 4U; ++string_index) {
+                    const unsigned char *value = NULL;
+                    size_t length = 0U;
+                    if (vps_column_set_string(
+                            &table->table_metadata.columns,
+                            strings[string_index], &value, &length) ==
+                            VPS_METADATA_OK && value != NULL)
+                        vps_snapshot_hash_bytes(&field.policy_fingerprint,
+                                                value, length);
+                }
+                break;
+            }
+        }
+        if (vps_metadata_snapshot_add_field(
+                snapshot, source->name, source->name_length, &field) !=
+                VPS_METADATA_CACHE_OK) {
+            vps_metadata_snapshot_reset(snapshot);
+            return SQLITE_NOMEM;
+        }
+    }
+    return vps_metadata_snapshot_validate(snapshot) == VPS_METADATA_CACHE_OK
+               ? SQLITE_OK : SQLITE_CORRUPT;
+}
+
+static char *vps_shadow_qualified(const VpsTable *table, const char *suffix)
+{
+    if (table == NULL || table->shadow_schema == NULL ||
+        table->shadow_name == NULL || suffix == NULL) return NULL;
+    return sqlite3_mprintf("\"%w\".\"%w%s\"", table->shadow_schema,
+                           table->shadow_name, suffix);
+}
+
+static int vps_shadow_store(VpsTable *table,
+                            const VpsMetadataSnapshot *snapshot)
+{
+    VpsBuffer encoded = {0};
+    sqlite3_stmt *statement = NULL;
+    char *schema_table = NULL;
+    char *metadata_table = NULL;
+    char *sql = NULL;
+    char source[17];
+    char layout[17];
+    int result = SQLITE_ERROR;
+    if (vps_metadata_snapshot_encode(snapshot, &encoded) !=
+        VPS_METADATA_CACHE_OK) return SQLITE_NOMEM;
+    schema_table = vps_shadow_qualified(table, "_vps_schema");
+    metadata_table = vps_shadow_qualified(table, "_vps_metadata");
+    if (schema_table == NULL || metadata_table == NULL) goto cleanup;
+    sql = sqlite3_mprintf(
+        "CREATE TABLE IF NOT EXISTS %s(format_version INTEGER NOT NULL,source_fingerprint TEXT NOT NULL,layout_fingerprint TEXT NOT NULL,relation_oid INTEGER NOT NULL,configuration_generation INTEGER NOT NULL,captured_at INTEGER NOT NULL,codec_version INTEGER NOT NULL,extension_version TEXT NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS %s(snapshot BLOB NOT NULL,last_validation INTEGER NOT NULL);"
+        "DELETE FROM %s;DELETE FROM %s;",
+        schema_table, metadata_table, schema_table, metadata_table);
+    if (sql == NULL) { result = SQLITE_NOMEM; goto cleanup; }
+    result = sqlite3_exec(table->database, sql, NULL, NULL, NULL);
+    sqlite3_free(sql); sql = NULL;
+    if (result != SQLITE_OK) goto cleanup;
+    (void)snprintf(source, sizeof(source), "%016llx",
+                   (unsigned long long)snapshot->source_fingerprint);
+    (void)snprintf(layout, sizeof(layout), "%016llx",
+                   (unsigned long long)snapshot->layout_fingerprint);
+    sql = sqlite3_mprintf("INSERT INTO %s VALUES(?,?,?,?,?,?,?,?)",
+                          schema_table);
+    if (sql == NULL) { result = SQLITE_NOMEM; goto cleanup; }
+    result = sqlite3_prepare_v2(table->database, sql, -1, &statement, NULL);
+    if (result == SQLITE_OK) {
+        sqlite3_bind_int(statement, 1, (int)VPS_METADATA_CACHE_VERSION);
+        sqlite3_bind_text(statement, 2, source, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 3, layout, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(statement, 4, snapshot->relation_oid);
+        sqlite3_bind_int64(statement, 5,
+                           (sqlite3_int64)snapshot->configuration_generation);
+        sqlite3_bind_int64(statement, 6,
+                           (sqlite3_int64)snapshot->captured_at_ms);
+        sqlite3_bind_int(statement, 7, (int)VPS_METADATA_CACHE_VERSION);
+        sqlite3_bind_text(statement, 8, "0.9.0", -1, SQLITE_STATIC);
+        result = sqlite3_step(statement) == SQLITE_DONE ? SQLITE_OK
+                                                        : SQLITE_ERROR;
+    }
+    sqlite3_finalize(statement); statement = NULL;
+    sqlite3_free(sql); sql = NULL;
+    if (result != SQLITE_OK) goto cleanup;
+    sql = sqlite3_mprintf("INSERT INTO %s VALUES(?,?)", metadata_table);
+    if (sql == NULL) { result = SQLITE_NOMEM; goto cleanup; }
+    result = sqlite3_prepare_v2(table->database, sql, -1, &statement, NULL);
+    if (result == SQLITE_OK && encoded.size <= INT_MAX) {
+        sqlite3_bind_blob(statement, 1, encoded.data, (int)encoded.size,
+                          SQLITE_TRANSIENT);
+        sqlite3_bind_int64(statement, 2,
+                           (sqlite3_int64)snapshot->validated_at_ms);
+        result = sqlite3_step(statement) == SQLITE_DONE ? SQLITE_OK
+                                                        : SQLITE_ERROR;
+    }
+cleanup:
+    sqlite3_finalize(statement);
+    sqlite3_free(sql); sqlite3_free(schema_table); sqlite3_free(metadata_table);
+    vps_buffer_reset(&encoded);
+    return result;
+}
+
+static int vps_shadow_load(VpsTable *table, VpsMetadataSnapshot *snapshot)
+{
+    sqlite3_stmt *statement = NULL;
+    char *schema_table = vps_shadow_qualified(table, "_vps_schema");
+    char *metadata_table = vps_shadow_qualified(table, "_vps_metadata");
+    char *sql = NULL;
+    VpsBuffer bytes = {0};
+    char schema_source[17] = {0};
+    char schema_layout[17] = {0};
+    sqlite3_int64 schema_relation = 0;
+    sqlite3_int64 schema_generation = 0;
+    sqlite3_int64 schema_captured = 0;
+    sqlite3_int64 metadata_validated = 0;
+    int result = SQLITE_CORRUPT;
+    int step;
+    if (schema_table == NULL || metadata_table == NULL) {
+        result = SQLITE_NOMEM; goto cleanup;
+    }
+    sql = sqlite3_mprintf(
+        "SELECT format_version,source_fingerprint,layout_fingerprint,"
+        "relation_oid,configuration_generation,captured_at,codec_version,"
+        "extension_version FROM %s", schema_table);
+    if (sql == NULL) { result = SQLITE_NOMEM; goto cleanup; }
+    if (sqlite3_prepare_v2(table->database, sql, -1, &statement, NULL) !=
+        SQLITE_OK) { result = SQLITE_NOTFOUND; goto cleanup; }
+    step = sqlite3_step(statement);
+    if (step != SQLITE_ROW || sqlite3_column_count(statement) != 8 ||
+        sqlite3_column_int(statement, 0) != (int)VPS_METADATA_CACHE_VERSION ||
+        sqlite3_column_type(statement, 1) != SQLITE_TEXT ||
+        sqlite3_column_bytes(statement, 1) != 16 ||
+        sqlite3_column_type(statement, 2) != SQLITE_TEXT ||
+        sqlite3_column_bytes(statement, 2) != 16 ||
+        sqlite3_column_int(statement, 6) != (int)VPS_METADATA_CACHE_VERSION ||
+        sqlite3_column_type(statement, 7) != SQLITE_TEXT ||
+        sqlite3_column_bytes(statement, 7) != 5 ||
+        memcmp(sqlite3_column_text(statement, 7), "0.9.0", 5U) != 0)
+        goto cleanup;
+    (void)memcpy(schema_source, sqlite3_column_text(statement, 1), 16U);
+    (void)memcpy(schema_layout, sqlite3_column_text(statement, 2), 16U);
+    schema_relation = sqlite3_column_int64(statement, 3);
+    schema_generation = sqlite3_column_int64(statement, 4);
+    schema_captured = sqlite3_column_int64(statement, 5);
+    if (sqlite3_step(statement) != SQLITE_DONE) goto cleanup;
+    sqlite3_finalize(statement); statement = NULL;
+    sqlite3_free(sql); sql = NULL;
+    sql = sqlite3_mprintf("SELECT snapshot,last_validation FROM %s",
+                          metadata_table);
+    if (sql == NULL) { result = SQLITE_NOMEM; goto cleanup; }
+    if (sqlite3_prepare_v2(table->database, sql, -1, &statement, NULL) !=
+        SQLITE_OK) { result = SQLITE_NOTFOUND; goto cleanup; }
+    step = sqlite3_step(statement);
+    if (step != SQLITE_ROW || sqlite3_column_count(statement) != 2 ||
+        sqlite3_column_type(statement, 0) != SQLITE_BLOB ||
+        sqlite3_column_bytes(statement, 0) <= 0 ||
+        sqlite3_column_bytes(statement, 0) >
+            (int)VPS_METADATA_CACHE_MAX_BYTES ||
+        vps_buffer_init(&bytes, &table->allocator,
+                        VPS_METADATA_CACHE_MAX_BYTES) != VPS_MEMORY_OK ||
+        vps_buffer_append(&bytes, sqlite3_column_blob(statement, 0),
+                          (size_t)sqlite3_column_bytes(statement, 0)) !=
+            VPS_MEMORY_OK) {
+        result = SQLITE_CORRUPT; goto cleanup;
+    }
+    metadata_validated = sqlite3_column_int64(statement, 1);
+    if (sqlite3_step(statement) != SQLITE_DONE) goto cleanup;
+    result = vps_metadata_snapshot_decode(snapshot, &table->allocator,
+                                          bytes.data, bytes.size) ==
+                 VPS_METADATA_CACHE_OK ? SQLITE_OK : SQLITE_CORRUPT;
+    if (result == SQLITE_OK) {
+        char expected_source[17];
+        char expected_layout[17];
+        (void)snprintf(expected_source, sizeof(expected_source), "%016llx",
+                       (unsigned long long)snapshot->source_fingerprint);
+        (void)snprintf(expected_layout, sizeof(expected_layout), "%016llx",
+                       (unsigned long long)snapshot->layout_fingerprint);
+        if (memcmp(schema_source, expected_source, 16U) != 0 ||
+            memcmp(schema_layout, expected_layout, 16U) != 0 ||
+            schema_relation != (sqlite3_int64)snapshot->relation_oid ||
+            schema_generation !=
+                (sqlite3_int64)snapshot->configuration_generation ||
+            schema_captured != (sqlite3_int64)snapshot->captured_at_ms ||
+            metadata_validated != (sqlite3_int64)snapshot->validated_at_ms)
+            result = SQLITE_CORRUPT;
+    }
+cleanup:
+    sqlite3_finalize(statement); sqlite3_free(sql);
+    sqlite3_free(schema_table); sqlite3_free(metadata_table);
+    vps_buffer_reset(&bytes);
+    return result;
+}
+
+static int vps_table_snapshot_hydrate(VpsTable *table,
+                                      const VpsMetadataSnapshot *snapshot)
+{
+    size_t allocation_size;
+    size_t index;
+    if (vps_size_multiply(snapshot->field_count,
+                          sizeof(*table->described.fields),
+                          &allocation_size) != VPS_MEMORY_OK ||
+        vps_query_describe_result_init(&table->described, &table->allocator) !=
+            VPS_QUERY_VALIDATION_OK ||
+        vps_memory_allocate(&table->allocator, allocation_size,
+                            (void **)&table->described.fields) != VPS_MEMORY_OK)
+        return SQLITE_NOMEM;
+    table->initialized_described = 1;
+    table->described.allocation_size = allocation_size;
+    table->described.field_count = snapshot->field_count;
+    (void)memset(table->described.fields, 0, allocation_size);
+    for (index = 0U; index < snapshot->field_count; ++index) {
+        const VpsMetadataCacheField *field = &snapshot->fields[index];
+        VpsQueryDescribeField *destination = &table->described.fields[index];
+        size_t name_length;
+        const char *name = vps_metadata_snapshot_field_name(
+            snapshot, index, &name_length);
+        if (name == NULL || name_length > VPS_CLIENT_MAX_FIELD_NAME_BYTES)
+            return SQLITE_CORRUPT;
+        (void)memcpy(destination->name, name, name_length);
+        destination->name[name_length] = '\0';
+        destination->name_length = name_length;
+        destination->type_oid = field->type_oid;
+        destination->type_modifier = field->type_modifier;
+        destination->origin_relation_oid = field->origin_relation_oid;
+        destination->origin_attribute_number = field->origin_attribute_number;
+        destination->format = VPS_CLIENT_VALUE_TEXT;
+        table->spatial_kind[index] = field->spatial_kind;
+        table->spatial_type[index] =
+            (VpsSpatialGeometryType)field->spatial_type;
+        table->spatial_dimensions[index] = field->spatial_dimensions;
+        table->spatial_srid[index] = field->spatial_srid;
+    }
+    table->visible_field_count = snapshot->visible_count;
+    table->key_column_count = snapshot->key_count;
+    for (index = 0U; index < snapshot->key_count; ++index)
+        table->key_columns[index] = snapshot->key_columns[index];
+    table->source_fingerprint = snapshot->source_fingerprint;
+    table->spatial.namespace_oid = snapshot->spatial_namespace_oid;
+    table->spatial.geometry_oid = snapshot->spatial_geometry_oid;
+    table->spatial.geography_oid = snapshot->spatial_geography_oid;
+    table->spatial.flags = snapshot->spatial_flags;
+    table->spatial.present = snapshot->spatial_geometry_oid != 0U ||
+                             snapshot->spatial_geography_oid != 0U;
+    table->spatial_format = (VpsSpatialFormat)snapshot->spatial_format;
+    return SQLITE_OK;
+}
+
+static int vps_module_connect_common(sqlite3 *database,
+                                     void *auxiliary,
+                                     int argument_count,
+                                     const char *const *arguments,
+                                     sqlite3_vtab **table_out,
+                                     char **error_out,
+                                     int creating)
 {
     VpsTable *table;
+    VpsMetadataSnapshot stored_snapshot = {0};
+    VpsMetadataSnapshot live_snapshot = {0};
     VpsError error;
     int error_initialized = 0;
     int result;
@@ -1399,8 +1847,20 @@ static int vps_module_connect(sqlite3 *database,
     if (table == NULL) return SQLITE_NOMEM;
     (void)memset(table, 0, sizeof(*table));
     table->database = database;
+    table->shadow_schema = argument_count >= 3
+        ? sqlite3_mprintf("%s", arguments[1]) : NULL;
+    table->shadow_name = argument_count >= 3
+        ? sqlite3_mprintf("%s", arguments[2]) : NULL;
+    if (table->shadow_schema == NULL || table->shadow_name == NULL) {
+        sqlite3_free(table->shadow_schema);
+        sqlite3_free(table->shadow_name);
+        sqlite3_free(table);
+        return SQLITE_NOMEM;
+    }
     table->module_context = (VpsModuleContext *)auxiliary;
     if (table->module_context == NULL || table->module_context->closing) {
+        sqlite3_free(table->shadow_schema);
+        sqlite3_free(table->shadow_name);
         sqlite3_free(table);
         return SQLITE_MISUSE;
     }
@@ -1414,6 +1874,28 @@ static int vps_module_connect(sqlite3 *database,
         failure = "source describe";
         result = vps_table_describe(table, &error);
     }
+    if (result != SQLITE_OK && !creating && table->metadata_cached &&
+        error_initialized &&
+        vps_metadata_cache_fallback_allowed(error.error_class)) {
+        vps_table_description_reset(table);
+        result = vps_shadow_load(table, &stored_snapshot);
+        if (result == SQLITE_OK) {
+            const char *fingerprint = vps_identity_fingerprint(&table->identity);
+            uint64_t hash = UINT64_C(1469598103934665603);
+            size_t index;
+            if (fingerprint != NULL)
+                for (index = 0U; fingerprint[index] != '\0'; ++index) {
+                    hash ^= (unsigned char)fingerprint[index];
+                    hash *= UINT64_C(1099511628211);
+                }
+            if (hash != stored_snapshot.connection_identity_hash)
+                result = SQLITE_AUTH;
+        }
+        if (result == SQLITE_OK)
+            result = vps_table_snapshot_hydrate(table, &stored_snapshot);
+        if (result == SQLITE_OK) table->cache_fallback = 1;
+        failure = "cached metadata declaration";
+    }
     if (result == SQLITE_OK) {
         table->visible_field_count = table->described.field_count;
         if (table->optimistic_mode == VPS_DML_OPTIMISTIC_XMIN) {
@@ -1423,7 +1905,7 @@ static int vps_module_connect(sqlite3 *database,
                 table->visible_field_count -= 1U;
         }
     }
-    if (result == SQLITE_OK) {
+    if (result == SQLITE_OK && !table->cache_fallback) {
         failure = "spatial integration";
         if (!vps_table_integrate_spatial(table)) result = SQLITE_ERROR;
     }
@@ -1441,8 +1923,27 @@ static int vps_module_connect(sqlite3 *database,
     if (result == SQLITE_OK &&
         table->visible_field_count > VPS_PLAN_MAX_COLUMNS)
         result = SQLITE_TOOBIG;
-    if (result == SQLITE_OK)
+    if (result == SQLITE_OK && !table->cache_fallback)
         table->source_fingerprint = vps_vtab_source_fingerprint(table);
+    if (result == SQLITE_OK && !table->cache_fallback) {
+        failure = "metadata snapshot";
+        result = vps_table_snapshot_build(table, &live_snapshot);
+    }
+    if (result == SQLITE_OK && !creating && !table->cache_fallback) {
+        VpsMetadataDrift drift;
+        failure = "metadata drift validation";
+        result = vps_shadow_load(table, &stored_snapshot);
+        if (result == SQLITE_OK) {
+            drift = vps_metadata_snapshot_compare(&stored_snapshot,
+                                                  &live_snapshot);
+            if (drift == VPS_METADATA_DRIFT_INCOMPATIBLE ||
+                (drift == VPS_METADATA_DRIFT_REFRESHABLE &&
+                 !table->schema_refresh))
+                result = SQLITE_SCHEMA;
+            else if (drift == VPS_METADATA_DRIFT_REFRESHABLE)
+                result = vps_shadow_store(table, &live_snapshot);
+        }
+    }
 #if defined(VPS_ENABLE_QUERY_MATERIALIZATION)
     if (result == SQLITE_OK && !vps_table_materialization_init(table))
         result = SQLITE_ERROR;
@@ -1450,6 +1951,10 @@ static int vps_module_connect(sqlite3 *database,
     if (result == SQLITE_OK) {
         failure = "SQLite schema declaration";
         result = vps_declare_schema(database, table);
+    }
+    if (result == SQLITE_OK && creating) {
+        failure = "shadow metadata write";
+        result = vps_shadow_store(table, &live_snapshot);
     }
     if (result != SQLITE_OK) {
         if (error_out != NULL) {
@@ -1460,17 +1965,68 @@ static int vps_module_connect(sqlite3 *database,
                 : sqlite3_mprintf("VirtualPostgreSQL %s failed", failure);
         }
         if (error_initialized) vps_error_reset(&error);
+        vps_metadata_snapshot_reset(&stored_snapshot);
+        vps_metadata_snapshot_reset(&live_snapshot);
         (void)vps_table_cleanup(table);
         return result;
     }
     if (error_initialized) vps_error_reset(&error);
+    vps_metadata_snapshot_reset(&stored_snapshot);
+    vps_metadata_snapshot_reset(&live_snapshot);
     *table_out = &table->base;
     return SQLITE_OK;
+}
+
+static int vps_module_create(sqlite3 *database, void *auxiliary,
+                             int argument_count,
+                             const char *const *arguments,
+                             sqlite3_vtab **table_out, char **error_out)
+{
+    return vps_module_connect_common(database, auxiliary, argument_count,
+                                     arguments, table_out, error_out, 1);
+}
+
+static int vps_module_connect(sqlite3 *database, void *auxiliary,
+                              int argument_count,
+                              const char *const *arguments,
+                              sqlite3_vtab **table_out, char **error_out)
+{
+    return vps_module_connect_common(database, auxiliary, argument_count,
+                                     arguments, table_out, error_out, 0);
 }
 
 static int vps_module_disconnect(sqlite3_vtab *base)
 {
     return vps_table_cleanup((VpsTable *)base);
+}
+
+static int vps_module_destroy(sqlite3_vtab *base)
+{
+    VpsTable *table = (VpsTable *)base;
+    char *schema_table;
+    char *metadata_table;
+    char *sql;
+    int result;
+    if (table == NULL) return SQLITE_OK;
+    schema_table = vps_shadow_qualified(table, "_vps_schema");
+    metadata_table = vps_shadow_qualified(table, "_vps_metadata");
+    if (schema_table == NULL || metadata_table == NULL) {
+        sqlite3_free(schema_table); sqlite3_free(metadata_table);
+        (void)vps_table_cleanup(table);
+        return SQLITE_NOMEM;
+    }
+    sql = sqlite3_mprintf("DROP TABLE IF EXISTS %s;DROP TABLE IF EXISTS %s",
+                          metadata_table, schema_table);
+    sqlite3_free(schema_table); sqlite3_free(metadata_table);
+    if (sql == NULL) {
+        (void)vps_table_cleanup(table);
+        return SQLITE_NOMEM;
+    }
+    result = sqlite3_exec(table->database, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    if (vps_table_cleanup(table) != SQLITE_OK && result == SQLITE_OK)
+        result = SQLITE_ERROR;
+    return result;
 }
 
 static uint32_t vps_vtab_plan_capabilities(uint32_t type_oid)
@@ -2649,6 +3205,53 @@ static int vps_snapshot_filter(VpsCursor *cursor,
 }
 #endif
 
+static int vps_table_validate_cached_metadata(VpsTable *table)
+{
+    VpsMetadataSnapshot stored = {0};
+    VpsMetadataSnapshot live = {0};
+    VpsError error;
+    VpsMetadataDrift drift;
+    int result;
+    if (table == NULL || !table->cache_fallback) return SQLITE_OK;
+    result = vps_shadow_load(table, &stored);
+    if (result != SQLITE_OK) goto cleanup;
+    vps_table_description_reset(table);
+    if (vps_error_init(&error, &table->allocator) != VPS_MEMORY_OK) {
+        result = SQLITE_NOMEM; goto cleanup;
+    }
+    result = vps_table_describe(table, &error);
+    if (result == SQLITE_OK) {
+        table->visible_field_count = table->described.field_count;
+        result = vps_table_integrate_spatial(table) ? SQLITE_OK : SQLITE_ERROR;
+    }
+    if (result == SQLITE_OK && !vps_table_build_dml_policy(table))
+        result = SQLITE_ERROR;
+    if (result == SQLITE_OK && !vps_build_expected_fields(table))
+        result = SQLITE_NOMEM;
+    if (result == SQLITE_OK && !vps_resolve_row_identity(table))
+        result = SQLITE_ERROR;
+    if (result == SQLITE_OK) {
+        table->source_fingerprint = vps_vtab_source_fingerprint(table);
+        result = vps_table_snapshot_build(table, &live);
+    }
+    if (result == SQLITE_OK) {
+        drift = vps_metadata_snapshot_compare(&stored, &live);
+        if (drift == VPS_METADATA_DRIFT_INCOMPATIBLE ||
+            (drift == VPS_METADATA_DRIFT_REFRESHABLE &&
+             !table->schema_refresh))
+            result = SQLITE_SCHEMA;
+        else if (drift == VPS_METADATA_DRIFT_REFRESHABLE) {
+            result = vps_shadow_store(table, &live);
+            if (result == SQLITE_OK) result = SQLITE_SCHEMA;
+        } else table->cache_fallback = 0;
+    }
+    vps_error_reset(&error);
+cleanup:
+    vps_metadata_snapshot_reset(&stored);
+    vps_metadata_snapshot_reset(&live);
+    return result;
+}
+
 static int vps_module_filter(sqlite3_vtab_cursor *base,
                              int index_number,
                              const char *index_string,
@@ -2669,6 +3272,15 @@ static int vps_module_filter(sqlite3_vtab_cursor *base,
          cursor->machine.state != VPS_CURSOR_EOF))
         return SQLITE_MISUSE;
     table = cursor->table;
+    if (table->cache_fallback) {
+        result = vps_table_validate_cached_metadata(table);
+        if (result != SQLITE_OK)
+            return vps_vtab_set_error(
+                &table->base, result, NULL,
+                result == SQLITE_SCHEMA
+                    ? "VirtualPostgreSQL cached schema changed"
+                    : "VirtualPostgreSQL live metadata validation failed");
+    }
     (void)vps_cursor_release(cursor);
     if (vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_FILTER) !=
         VPS_CURSOR_OK)
@@ -3713,18 +4325,40 @@ static int vps_module_integrity(sqlite3_vtab *table,
                                 int flags,
                                 char **error_out)
 {
-    (void)table; (void)schema; (void)table_name; (void)flags;
+    VpsTable *vtab = (VpsTable *)table;
+    VpsMetadataSnapshot snapshot = {0};
+    int result;
+    (void)flags;
     if (error_out != NULL) *error_out = NULL;
+    if (vtab == NULL || schema == NULL || table_name == NULL)
+        return SQLITE_MISUSE;
+    if (strcmp(schema, vtab->shadow_schema) != 0 ||
+        strcmp(table_name, vtab->shadow_name) != 0) {
+        if (error_out != NULL) {
+            *error_out = sqlite3_mprintf(
+                "VirtualPostgreSQL integrity target mismatch");
+            if (*error_out == NULL) return SQLITE_NOMEM;
+        }
+        return SQLITE_OK;
+    }
+    result = vps_shadow_load(vtab, &snapshot);
+    vps_metadata_snapshot_reset(&snapshot);
+    if (result == SQLITE_NOMEM) return SQLITE_NOMEM;
+    if (result != SQLITE_OK && error_out != NULL) {
+        *error_out = sqlite3_mprintf(
+            "VirtualPostgreSQL shadow metadata is inconsistent");
+        if (*error_out == NULL) return SQLITE_NOMEM;
+    }
     return SQLITE_OK;
 }
 
 const sqlite3_module VPS_MODULE = {
     .iVersion = 4,
-    .xCreate = vps_module_connect,
+    .xCreate = vps_module_create,
     .xConnect = vps_module_connect,
     .xBestIndex = vps_module_best_index,
     .xDisconnect = vps_module_disconnect,
-    .xDestroy = vps_module_disconnect,
+    .xDestroy = vps_module_destroy,
     .xOpen = vps_module_open,
     .xClose = vps_module_close,
     .xFilter = vps_module_filter,
@@ -3751,19 +4385,71 @@ static int vps_metadata_connect(sqlite3 *database,
                                 sqlite3_vtab **table_out,
                                 char **error_out)
 {
-    VpsEmptyTable *table;
+    static const char relations_decl[] =
+        "CREATE TABLE x(schema_name TEXT,relation_name TEXT,relation_oid INTEGER,relkind TEXT,persistence TEXT,owner TEXT,tablespace TEXT,estimated_rows REAL,estimated_pages INTEGER,relation_bytes INTEGER,total_bytes INTEGER,comment TEXT,row_security INTEGER,force_row_security INTEGER,is_partition INTEGER,parent_schema TEXT,parent_relation TEXT,parent_oid INTEGER,readable INTEGER,writable_candidate INTEGER,supported INTEGER,statistics_available INTEGER,classification TEXT,connection TEXT HIDDEN,schema TEXT HIDDEN)";
+    static const char table_info_decl[] =
+        "CREATE TABLE x(cid INTEGER,name TEXT,type TEXT,\"notnull\" INTEGER,dflt_value TEXT,pk INTEGER,hidden INTEGER,attnum INTEGER,type_oid INTEGER,type_modifier INTEGER,type_schema TEXT,type_name TEXT,domain_schema TEXT,domain_name TEXT,array_element_schema TEXT,array_element_name TEXT,collation TEXT,identity_kind TEXT,generated_kind TEXT,storage_kind TEXT,compression_kind TEXT,comment TEXT,postgis_kind TEXT,postgis_srid INTEGER,postgis_typmod INTEGER,connection TEXT HIDDEN,schema TEXT HIDDEN,relation TEXT HIDDEN)";
+    static const char index_list_decl[] =
+        "CREATE TABLE x(seq INTEGER,name TEXT,unique_flag INTEGER,origin TEXT,partial INTEGER,valid INTEGER,ready INTEGER,immediate INTEGER,primary_flag INTEGER,exclusion INTEGER,nulls_not_distinct INTEGER,access_method TEXT,key_columns INTEGER,include_columns INTEGER,predicate TEXT,has_expressions INTEGER,connection TEXT HIDDEN,schema TEXT HIDDEN,relation TEXT HIDDEN)";
+    static const char index_info_decl[] =
+        "CREATE TABLE x(seqno INTEGER,cid INTEGER,name TEXT,descending INTEGER,nulls_first INTEGER,collation TEXT,opclass TEXT,included INTEGER,expression TEXT,key_column INTEGER,type_oid INTEGER,type_modifier INTEGER,ordinal INTEGER,connection TEXT HIDDEN,schema TEXT HIDDEN,relation TEXT HIDDEN,index_name TEXT HIDDEN)";
+    static const char type_info_decl[] =
+        "CREATE TABLE x(type_schema TEXT,type_name TEXT,type_oid INTEGER,type_kind TEXT,type_category TEXT,type_length INTEGER,by_value INTEGER,alignment TEXT,storage TEXT,not_null INTEGER,base_type_oid INTEGER,base_type_modifier INTEGER,element_type_oid INTEGER,array_type_oid INTEGER,collation TEXT,extension_name TEXT,extension_version TEXT,formatted_type TEXT,connection TEXT HIDDEN,requested_schema TEXT HIDDEN,requested_name TEXT HIDDEN)";
+    static const char extensions_decl[] =
+        "CREATE TABLE x(name TEXT,version TEXT,schema_name TEXT,schema_oid INTEGER,relocatable INTEGER,config TEXT,condition TEXT,extension_oid INTEGER,connection TEXT HIDDEN)";
+    const char *declaration = NULL;
+    VpsMetadataTable *table;
     int result;
-    (void)auxiliary; (void)arguments; (void)error_out;
+    (void)error_out;
     if (database == NULL || table_out == NULL || argument_count != 3)
         return SQLITE_MISUSE;
-    result = sqlite3_declare_vtab(
-        database, "CREATE TABLE x(name TEXT, connection HIDDEN)");
+    if (strcmp(arguments[0], "virtualpostgresql_relations") == 0) {
+        declaration = relations_decl;
+    } else if (strcmp(arguments[0], "virtualpostgresql_table_info") == 0) {
+        declaration = table_info_decl;
+    } else if (strcmp(arguments[0], "virtualpostgresql_index_list") == 0) {
+        declaration = index_list_decl;
+    } else if (strcmp(arguments[0], "virtualpostgresql_index_info") == 0) {
+        declaration = index_info_decl;
+    } else if (strcmp(arguments[0], "virtualpostgresql_type_info") == 0) {
+        declaration = type_info_decl;
+    } else if (strcmp(arguments[0], "virtualpostgresql_extensions") == 0) {
+        declaration = extensions_decl;
+    } else return SQLITE_MISUSE;
+    result = sqlite3_declare_vtab(database, declaration);
     if (result != SQLITE_OK) return result;
     result = sqlite3_vtab_config(database, SQLITE_VTAB_DIRECTONLY);
     if (result != SQLITE_OK) return result;
-    table = (VpsEmptyTable *)sqlite3_malloc64(sizeof(*table));
+    table = (VpsMetadataTable *)sqlite3_malloc64(sizeof(*table));
     if (table == NULL) return SQLITE_NOMEM;
     (void)memset(table, 0, sizeof(*table));
+    table->database = database;
+    table->module_context = (VpsModuleContext *)auxiliary;
+    if (strcmp(arguments[0], "virtualpostgresql_relations") == 0) {
+        table->kind = VPS_METADATA_FUNCTION_RELATIONS;
+        table->query = VPS_CATALOG_QUERY_RELATIONS_FUNCTION;
+        table->visible_count = 23U; table->hidden_count = 2U;
+    } else if (strcmp(arguments[0], "virtualpostgresql_table_info") == 0) {
+        table->kind = VPS_METADATA_FUNCTION_TABLE_INFO;
+        table->query = VPS_CATALOG_QUERY_TABLE_INFO_FUNCTION;
+        table->visible_count = 25U; table->hidden_count = 3U;
+    } else if (strcmp(arguments[0], "virtualpostgresql_index_list") == 0) {
+        table->kind = VPS_METADATA_FUNCTION_INDEX_LIST;
+        table->query = VPS_CATALOG_QUERY_INDEX_LIST_FUNCTION;
+        table->visible_count = 16U; table->hidden_count = 3U;
+    } else if (strcmp(arguments[0], "virtualpostgresql_index_info") == 0) {
+        table->kind = VPS_METADATA_FUNCTION_INDEX_INFO;
+        table->query = VPS_CATALOG_QUERY_INDEX_INFO_FUNCTION;
+        table->visible_count = 13U; table->hidden_count = 4U;
+    } else if (strcmp(arguments[0], "virtualpostgresql_type_info") == 0) {
+        table->kind = VPS_METADATA_FUNCTION_TYPE_INFO;
+        table->query = VPS_CATALOG_QUERY_TYPE_INFO_FUNCTION;
+        table->visible_count = 18U; table->hidden_count = 3U;
+    } else {
+        table->kind = VPS_METADATA_FUNCTION_EXTENSIONS;
+        table->query = VPS_CATALOG_QUERY_EXTENSIONS_FUNCTION;
+        table->visible_count = 8U; table->hidden_count = 1U;
+    }
     *table_out = &table->base;
     return SQLITE_OK;
 }
@@ -3777,21 +4463,76 @@ static int vps_metadata_disconnect(sqlite3_vtab *table)
 static int vps_metadata_open(sqlite3_vtab *table,
                              sqlite3_vtab_cursor **cursor_out)
 {
-    VpsEmptyCursor *cursor;
-    (void)table;
+    VpsMetadataCursor *cursor;
     if (cursor_out == NULL) return SQLITE_MISUSE;
-    cursor = (VpsEmptyCursor *)sqlite3_malloc64(sizeof(*cursor));
+    cursor = (VpsMetadataCursor *)sqlite3_malloc64(sizeof(*cursor));
     if (cursor == NULL) return SQLITE_NOMEM;
     (void)memset(cursor, 0, sizeof(*cursor));
-    cursor->is_eof = 1;
+    cursor->table = (VpsMetadataTable *)table;
     *cursor_out = &cursor->base;
     return SQLITE_OK;
 }
 
 static int vps_metadata_close(sqlite3_vtab_cursor *cursor)
 {
+    VpsMetadataCursor *metadata = (VpsMetadataCursor *)cursor;
+    if (metadata == NULL) return SQLITE_OK;
+    if (metadata->lease.pool != NULL)
+        (void)vps_connection_lease_release(&metadata->lease,
+                                           VPS_CONNECTION_LEASE_CLEAN);
+    if (metadata->initialized_rows) vps_metadata_rowset_reset(&metadata->rows);
+    if (metadata->runtime != NULL) (void)vps_table_cleanup(metadata->runtime);
     sqlite3_free(cursor);
     return SQLITE_OK;
+}
+
+static int vps_metadata_runtime_create(VpsMetadataCursor *cursor,
+                                       const unsigned char *connection,
+                                       size_t connection_length)
+{
+    const char *argv[7] = {"VirtualPostgreSQL", "main", "metadata", NULL,
+                           "source='table'", "schema='pg_catalog'",
+                           "table='pg_class'"};
+    char *connarg;
+    size_t index;
+    size_t out = 0U;
+    size_t allocation;
+    VpsError ignored;
+    if (cursor == NULL || connection == NULL || connection_length == 0U ||
+        connection_length > 4096U ||
+        vps_size_multiply(connection_length, 2U, &allocation) !=
+            VPS_MEMORY_OK || allocation > SIZE_MAX - 12U)
+        return SQLITE_MISUSE;
+    allocation += 12U;
+    connarg = (char *)sqlite3_malloc64((sqlite3_uint64)allocation);
+    cursor->runtime = (VpsTable *)sqlite3_malloc64(sizeof(*cursor->runtime));
+    if (connarg == NULL || cursor->runtime == NULL) {
+        sqlite3_free(connarg);
+        sqlite3_free(cursor->runtime); cursor->runtime = NULL;
+        return SQLITE_NOMEM;
+    }
+    (void)memset(cursor->runtime, 0, sizeof(*cursor->runtime));
+    (void)memset(&ignored, 0, sizeof(ignored));
+    (void)memcpy(connarg, "connstr='", 9U); out = 9U;
+    for (index = 0U; index < connection_length; ++index) {
+        if (connection[index] == '\0') {
+            (void)vps_platform_secure_zero(vps_platform_current_operations(),
+                                           connarg, allocation);
+            sqlite3_free(connarg);
+            (void)vps_table_cleanup(cursor->runtime); cursor->runtime = NULL;
+            return SQLITE_MISUSE;
+        }
+        connarg[out++] = (char)connection[index];
+        if (connection[index] == '\'') connarg[out++] = '\'';
+    }
+    connarg[out++] = '\''; connarg[out] = '\0';
+    argv[3] = connarg;
+    index = (size_t)vps_table_initialize_runtime(cursor->runtime, 7, argv,
+                                                 &ignored);
+    (void)vps_platform_secure_zero(vps_platform_current_operations(), connarg,
+                                   allocation);
+    sqlite3_free(connarg);
+    return index == SQLITE_OK ? SQLITE_OK : (int)index;
 }
 
 static int vps_metadata_filter(sqlite3_vtab_cursor *cursor,
@@ -3800,55 +4541,246 @@ static int vps_metadata_filter(sqlite3_vtab_cursor *cursor,
                                int argument_count,
                                sqlite3_value **arguments)
 {
-    (void)index_number; (void)index_string; (void)argument_count;
-    (void)arguments;
-    if (cursor == NULL) return SQLITE_MISUSE;
-    ((VpsEmptyCursor *)cursor)->is_eof = 1;
-    return SQLITE_OK;
+    VpsMetadataCursor *metadata = (VpsMetadataCursor *)cursor;
+    VpsClientParameterView parameters[3];
+    VpsError error;
+    int result = SQLITE_OK;
+    size_t parameter;
+    (void)index_string;
+    if (metadata == NULL || metadata->table == NULL ||
+        index_number != (int)((1U << metadata->table->hidden_count) - 1U) ||
+        argument_count != (int)metadata->table->hidden_count)
+        return SQLITE_CONSTRAINT;
+    if (metadata->lease.pool != NULL)
+        (void)vps_connection_lease_release(&metadata->lease,
+                                           VPS_CONNECTION_LEASE_CLEAN);
+    if (metadata->initialized_rows) {
+        vps_metadata_rowset_reset(&metadata->rows);
+        metadata->initialized_rows = 0;
+    }
+    if (metadata->runtime != NULL) {
+        (void)vps_table_cleanup(metadata->runtime);
+        metadata->runtime = NULL;
+    }
+    metadata->row = 0U;
+    if (sqlite3_value_type(arguments[0]) == SQLITE_NULL) return SQLITE_MISUSE;
+    result = vps_metadata_runtime_create(
+        metadata, sqlite3_value_text(arguments[0]),
+        (size_t)sqlite3_value_bytes(arguments[0]));
+    if (result != SQLITE_OK) goto fail;
+    if (vps_connection_pool_acquire(
+            metadata->runtime->pool, &metadata->runtime->pool_key, 10000U,
+            NULL, NULL, &metadata->lease) != VPS_CONNECTION_POOL_OK) {
+        result = SQLITE_CANTOPEN;
+        goto fail;
+    }
+    if (vps_metadata_rowset_init(&metadata->rows,
+                                 &metadata->runtime->allocator,
+                                 &metadata->runtime->logger) != VPS_METADATA_OK) {
+        result = SQLITE_NOMEM;
+        goto fail;
+    }
+    metadata->initialized_rows = 1;
+    (void)memset(parameters, 0, sizeof(parameters));
+    for (parameter = 1U; parameter < metadata->table->hidden_count;
+         ++parameter) {
+        if (sqlite3_value_type(arguments[parameter]) == SQLITE_NULL) {
+            result = SQLITE_MISUSE;
+            goto fail;
+        }
+        parameters[parameter - 1U].value =
+            sqlite3_value_text(arguments[parameter]);
+        parameters[parameter - 1U].length =
+            (size_t)sqlite3_value_bytes(arguments[parameter]);
+        parameters[parameter - 1U].type_oid = VPS_METADATA_TEXT_OID;
+        parameters[parameter - 1U].format = VPS_CLIENT_VALUE_TEXT;
+    }
+    if (vps_error_init(&error, &metadata->runtime->allocator) != VPS_MEMORY_OK) {
+        result = SQLITE_NOMEM;
+        goto fail;
+    }
+    if (vps_catalog_metadata_fetch(
+            (VpsClientConnection *)metadata->lease.connection,
+            metadata->table->query, parameters,
+            metadata->table->hidden_count - 1U, &metadata->rows,
+            &error) != VPS_CLIENT_OK) {
+        result = error.sqlite_code != SQLITE_OK ? error.sqlite_code
+                                                 : SQLITE_ERROR;
+        if (vps_error_message(&error) != NULL)
+            metadata->table->base.zErrMsg = sqlite3_mprintf(
+                "%s", vps_error_message(&error));
+    }
+    vps_error_reset(&error);
+    if (result == SQLITE_OK) {
+        (void)vps_connection_lease_release(&metadata->lease,
+                                           VPS_CONNECTION_LEASE_CLEAN);
+        return SQLITE_OK;
+    }
+fail:
+    if (metadata->lease.pool != NULL)
+        (void)vps_connection_lease_release(&metadata->lease,
+                                           VPS_CONNECTION_LEASE_DIRTY);
+    return result;
 }
 
 static int vps_metadata_best_index(sqlite3_vtab *table,
                                    sqlite3_index_info *index_info)
 {
-    (void)table;
+    VpsMetadataTable *metadata = (VpsMetadataTable *)table;
+    size_t hidden;
+    int argv_index = 1;
+    int mask = 0;
     if (index_info == NULL) return SQLITE_MISUSE;
-    index_info->estimatedCost = 1000000.0;
-    index_info->estimatedRows = 1000000;
+    for (hidden = 0U; hidden < metadata->hidden_count; ++hidden) {
+        int column = (int)(metadata->visible_count + hidden);
+        int constraint;
+        for (constraint = 0; constraint < index_info->nConstraint;
+             ++constraint) {
+            if (index_info->aConstraint[constraint].iColumn == column &&
+                index_info->aConstraint[constraint].op ==
+                    SQLITE_INDEX_CONSTRAINT_EQ &&
+                index_info->aConstraint[constraint].usable) {
+                index_info->aConstraintUsage[constraint].argvIndex = argv_index++;
+                index_info->aConstraintUsage[constraint].omit = 1;
+                mask |= 1 << hidden;
+                break;
+            }
+        }
+    }
+    index_info->idxNum = mask;
+    index_info->estimatedCost =
+        mask == (int)((1U << metadata->hidden_count) - 1U) ? 100.0 : 1.0e99;
+    index_info->estimatedRows = mask ==
+        (int)((1U << metadata->hidden_count) - 1U) ? 100 : 65536;
     return SQLITE_OK;
 }
 
 static int vps_metadata_next(sqlite3_vtab_cursor *cursor)
 {
-    if (cursor == NULL) return SQLITE_MISUSE;
-    ((VpsEmptyCursor *)cursor)->is_eof = 1;
+    VpsMetadataCursor *metadata = (VpsMetadataCursor *)cursor;
+    if (metadata == NULL) return SQLITE_MISUSE;
+    if (metadata->row < metadata->rows.row_count) ++metadata->row;
     return SQLITE_OK;
 }
 
 static int vps_metadata_eof(sqlite3_vtab_cursor *cursor)
 {
-    return cursor == NULL || ((VpsEmptyCursor *)cursor)->is_eof;
+    VpsMetadataCursor *metadata = (VpsMetadataCursor *)cursor;
+    return metadata == NULL || !metadata->initialized_rows ||
+           metadata->row >= metadata->rows.row_count;
+}
+
+static int vps_metadata_integer_column(VpsMetadataFunctionKind kind,
+                                       size_t column)
+{
+    switch (kind) {
+        case VPS_METADATA_FUNCTION_RELATIONS:
+            return column == 2U || (column >= 8U && column <= 10U) ||
+                   (column >= 12U && column <= 14U) ||
+                   (column >= 17U && column <= 21U);
+        case VPS_METADATA_FUNCTION_TABLE_INFO:
+            return column == 0U || column == 3U || column == 5U ||
+                   column == 6U || column == 7U || column == 8U ||
+                   column == 9U || column == 23U || column == 24U;
+        case VPS_METADATA_FUNCTION_INDEX_LIST:
+            return column == 0U || column == 2U ||
+                   (column >= 4U && column <= 10U) ||
+                   column == 12U || column == 13U || column == 15U;
+        case VPS_METADATA_FUNCTION_INDEX_INFO:
+            return column == 0U || column == 1U || column == 3U ||
+                   column == 4U || column == 7U ||
+                   (column >= 9U && column <= 12U);
+        case VPS_METADATA_FUNCTION_TYPE_INFO:
+            return column == 2U || column == 5U || column == 6U ||
+                   (column >= 9U && column <= 13U);
+        case VPS_METADATA_FUNCTION_EXTENSIONS:
+            return column == 3U || column == 4U || column == 7U;
+        default: return 0;
+    }
+}
+
+static int vps_metadata_parse_int64(const unsigned char *value,
+                                    size_t length,
+                                    sqlite3_int64 *parsed)
+{
+    uint64_t magnitude = 0U;
+    size_t index = 0U;
+    int negative = 0;
+    if (value == NULL || length == 0U || parsed == NULL) return 0;
+    if ((length == 1U && value[0] == 't') ||
+        (length == 4U && memcmp(value, "true", 4U) == 0)) {
+        *parsed = 1; return 1;
+    }
+    if ((length == 1U && value[0] == 'f') ||
+        (length == 5U && memcmp(value, "false", 5U) == 0)) {
+        *parsed = 0; return 1;
+    }
+    if (value[0] == '-') { negative = 1; index = 1U; }
+    if (index == length) return 0;
+    for (; index < length; ++index) {
+        uint64_t digit;
+        if (value[index] < '0' || value[index] > '9') return 0;
+        digit = (uint64_t)(value[index] - '0');
+        if (magnitude > (UINT64_MAX - digit) / 10U) return 0;
+        magnitude = magnitude * 10U + digit;
+    }
+    if ((!negative && magnitude > (uint64_t)INT64_MAX) ||
+        (negative && magnitude > (uint64_t)INT64_MAX + 1U)) return 0;
+    *parsed = negative
+        ? (magnitude == (uint64_t)INT64_MAX + 1U ? INT64_MIN
+                                                : -(sqlite3_int64)magnitude)
+        : (sqlite3_int64)magnitude;
+    return 1;
 }
 
 static int vps_metadata_column(sqlite3_vtab_cursor *cursor,
                                sqlite3_context *context,
                                int column)
 {
-    (void)cursor; (void)column;
-    sqlite3_result_null(context);
+    VpsMetadataCursor *metadata = (VpsMetadataCursor *)cursor;
+    const unsigned char *value = NULL;
+    size_t length = 0U;
+    int is_null = 1;
+    if (metadata == NULL || context == NULL || column < 0 ||
+        (size_t)column >= metadata->table->visible_count ||
+        vps_metadata_rowset_cell(&metadata->rows, metadata->row,
+                                 (size_t)column, &value, &length,
+                                 &is_null) != VPS_METADATA_OK)
+        return SQLITE_RANGE;
+    if (is_null) sqlite3_result_null(context);
+    else if (length > INT_MAX) return SQLITE_TOOBIG;
+    else if (vps_metadata_integer_column(metadata->table->kind,
+                                          (size_t)column)) {
+        sqlite3_int64 integer;
+        if (!vps_metadata_parse_int64(value, length, &integer))
+            return SQLITE_CORRUPT;
+        sqlite3_result_int64(context, integer);
+    } else if (metadata->table->kind == VPS_METADATA_FUNCTION_RELATIONS &&
+               column == 7) {
+        char number[64];
+        char *end = NULL;
+        double real;
+        if (length == 0U || length >= sizeof(number)) return SQLITE_CORRUPT;
+        (void)memcpy(number, value, length); number[length] = '\0';
+        real = strtod(number, &end);
+        if (end == NULL || *end != '\0') return SQLITE_CORRUPT;
+        sqlite3_result_double(context, real);
+    } else sqlite3_result_text(context, (const char *)value, (int)length,
+                               SQLITE_TRANSIENT);
     return SQLITE_OK;
 }
 
 static int vps_metadata_rowid(sqlite3_vtab_cursor *cursor,
                               sqlite3_int64 *rowid)
 {
-    (void)cursor;
+    VpsMetadataCursor *metadata = (VpsMetadataCursor *)cursor;
     if (rowid == NULL) return SQLITE_MISUSE;
-    *rowid = 0;
+    *rowid = (sqlite3_int64)(metadata->row + 1U);
     return SQLITE_OK;
 }
 
 const sqlite3_module VPS_METADATA_MODULE = {
-    .iVersion = 4,
+    .iVersion = 3,
     .xConnect = vps_metadata_connect,
     .xBestIndex = vps_metadata_best_index,
     .xDisconnect = vps_metadata_disconnect,
@@ -3858,6 +4790,5 @@ const sqlite3_module VPS_METADATA_MODULE = {
     .xNext = vps_metadata_next,
     .xEof = vps_metadata_eof,
     .xColumn = vps_metadata_column,
-    .xRowid = vps_metadata_rowid,
-    .xIntegrity = vps_module_integrity
+    .xRowid = vps_metadata_rowid
 };

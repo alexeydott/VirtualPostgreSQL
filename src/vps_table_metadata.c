@@ -59,7 +59,7 @@ static VpsClientStatus vps_metadata_drive(VpsClientStatement *statement,
     return VPS_CLIENT_LIMIT_EXCEEDED;
 }
 
-static VpsClientStatus vps_metadata_fetch(
+VpsClientStatus vps_catalog_metadata_fetch(
     VpsClientConnection *connection,
     VpsCatalogQuery query,
     const VpsClientParameterView *parameters,
@@ -75,7 +75,8 @@ static VpsClientStatus vps_metadata_fetch(
     size_t rows = 0U;
     (void)memset(&row_view, 0, sizeof(row_view));
     (void)memset(&input, 0, sizeof(input));
-    if (vps_libpq_metadata_statement_init(
+    if (connection == NULL || rowset == NULL ||
+        vps_libpq_metadata_statement_init(
             &spec, query, parameters, parameter_count,
             VPS_TABLE_METADATA_TIMEOUT_MS) != VPS_METADATA_OK)
         return VPS_CLIENT_INVALID_ARGUMENT;
@@ -182,7 +183,7 @@ VpsMetadataResult vps_table_metadata_load(
         goto cleanup;
     vps_metadata_text_parameter(&parameters[0], schema, schema_length);
     vps_metadata_text_parameter(&parameters[1], relation, relation_length);
-    if (vps_metadata_fetch(connection, VPS_CATALOG_QUERY_RELATION,
+    if (vps_catalog_metadata_fetch(connection, VPS_CATALOG_QUERY_RELATION,
                            parameters, 2U, &rowset, error) != VPS_CLIENT_OK ||
         vps_relation_metadata_resolve(&metadata->relation, &rowset,
                                       schema, schema_length,
@@ -198,20 +199,20 @@ VpsMetadataResult vps_table_metadata_load(
                                 (size_t)relation_oid_length);
     vps_metadata_rowset_reset(&rowset);
     if (vps_metadata_rowset_init(&rowset, allocator, logger) != VPS_METADATA_OK ||
-        vps_metadata_fetch(connection, VPS_CATALOG_QUERY_COLUMNS,
+        vps_catalog_metadata_fetch(connection, VPS_CATALOG_QUERY_COLUMNS,
                            parameters, 1U, &rowset, error) != VPS_CLIENT_OK ||
         vps_column_set_build(&metadata->columns, &rowset) != VPS_METADATA_OK)
         goto cleanup;
     vps_metadata_rowset_reset(&rowset);
     if (vps_metadata_rowset_init(&rowset, allocator, logger) != VPS_METADATA_OK ||
-        vps_metadata_fetch(connection, VPS_CATALOG_QUERY_KEYS,
+        vps_catalog_metadata_fetch(connection, VPS_CATALOG_QUERY_KEYS,
                            parameters, 1U, &rowset, error) != VPS_CLIENT_OK ||
         vps_key_discover(&rowset, &metadata->columns, NULL, 0U, 0,
                          logger, &metadata->key) != VPS_METADATA_OK)
         goto cleanup;
     vps_metadata_rowset_reset(&rowset);
     if (vps_metadata_rowset_init(&rowset, allocator, logger) != VPS_METADATA_OK ||
-        vps_metadata_fetch(connection, VPS_CATALOG_QUERY_RELATION_POLICY,
+        vps_catalog_metadata_fetch(connection, VPS_CATALOG_QUERY_RELATION_POLICY,
                            parameters, 1U, &rowset, error) != VPS_CLIENT_OK ||
         vps_relation_policy_build(&metadata->relation, &metadata->key,
                                   &rowset, logger, &metadata->policy) !=

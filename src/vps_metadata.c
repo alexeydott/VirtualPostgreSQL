@@ -97,6 +97,136 @@ static const char vps_postgis_sql[] =
     "AND EXISTS(SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::pg_catalog.regclass AND d.objid=gg.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.refobjid=e.oid AND d.deptype='e') "
     "WHERE e.extname=$1::pg_catalog.name";
 
+/* Public metadata functions deliberately return only text-formatted catalog
+ * scalars.  This keeps the shared async copy boundary independent of libpq
+ * native widths and makes every value subject to the same byte limits. */
+static const char vps_relations_function_sql[] =
+    "SELECT n.nspname::pg_catalog.text,c.relname::pg_catalog.text,"
+    "c.oid::pg_catalog.text,c.relkind::pg_catalog.text,"
+    "c.relpersistence::pg_catalog.text,r.rolname::pg_catalog.text,"
+    "ts.spcname::pg_catalog.text,c.reltuples::pg_catalog.text,"
+    "c.relpages::pg_catalog.text,pg_catalog.pg_relation_size(c.oid)::pg_catalog.text,"
+    "pg_catalog.pg_total_relation_size(c.oid)::pg_catalog.text,"
+    "d.description::pg_catalog.text,c.relrowsecurity::pg_catalog.text,"
+    "c.relforcerowsecurity::pg_catalog.text,c.relispartition::pg_catalog.text,"
+    "pn.nspname::pg_catalog.text,pc.relname::pg_catalog.text,"
+    "pc.oid::pg_catalog.text,"
+    "(c.relkind IN ('r','p','v','m','f'))::pg_catalog.text,"
+    "(c.relkind IN ('r','p'))::pg_catalog.text,"
+    "(c.relkind IN ('r','p','v','m','f'))::pg_catalog.text,"
+    "(c.reltuples>=0)::pg_catalog.text,"
+    "CASE c.relkind WHEN 'r' THEN 'table' WHEN 'p' THEN 'partitioned_table' "
+    "WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized_view' "
+    "WHEN 'f' THEN 'foreign_table' ELSE 'other' END::pg_catalog.text "
+    "FROM pg_catalog.pg_class c "
+    "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+    "JOIN pg_catalog.pg_roles r ON r.oid=c.relowner "
+    "LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid=c.reltablespace "
+    "LEFT JOIN pg_catalog.pg_description d ON d.objoid=c.oid AND d.objsubid=0 "
+    "LEFT JOIN pg_catalog.pg_inherits inh ON inh.inhrelid=c.oid AND inh.inhseqno=1 "
+    "LEFT JOIN pg_catalog.pg_class pc ON pc.oid=inh.inhparent "
+    "LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid=pc.relnamespace "
+    "WHERE n.nspname=$1::pg_catalog.name "
+    "ORDER BY c.relname,c.oid LIMIT 65536";
+
+static const char vps_table_info_function_sql[] =
+    "SELECT (pg_catalog.row_number() OVER (ORDER BY a.attnum)-1)::pg_catalog.text,"
+    "a.attname::pg_catalog.text,pg_catalog.format_type(a.atttypid,a.atttypmod)::pg_catalog.text,"
+    "a.attnotnull::pg_catalog.text,pg_catalog.pg_get_expr(ad.adbin,ad.adrelid,true)::pg_catalog.text,"
+    "(COALESCE(array_position(con.conkey,a.attnum),0))::pg_catalog.text,"
+    "'0'::pg_catalog.text,a.attnum::pg_catalog.text,a.atttypid::pg_catalog.text,"
+    "a.atttypmod::pg_catalog.text,tn.nspname::pg_catalog.text,t.typname::pg_catalog.text,"
+    "dn.nspname::pg_catalog.text,dt.typname::pg_catalog.text,"
+    "en.nspname::pg_catalog.text,et.typname::pg_catalog.text,"
+    "co.collname::pg_catalog.text,a.attidentity::pg_catalog.text,"
+    "a.attgenerated::pg_catalog.text,a.attstorage::pg_catalog.text,"
+    "a.attcompression::pg_catalog.text,des.description::pg_catalog.text,"
+    "CASE WHEN pe.extname='postgis' AND t.typname IN ('geometry','geography') "
+    "THEN t.typname ELSE NULL END::pg_catalog.text,"
+    "CASE WHEN pe.extname='postgis' AND a.atttypmod>=0 "
+    "THEN ((a.atttypmod-4)>>8)::pg_catalog.text ELSE NULL END,"
+    "CASE WHEN pe.extname='postgis' AND a.atttypmod>=0 "
+    "THEN ((a.atttypmod-4)&255)::pg_catalog.text ELSE NULL END "
+    "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+    "JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid "
+    "JOIN pg_catalog.pg_type t ON t.oid=a.atttypid "
+    "JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace "
+    "LEFT JOIN pg_catalog.pg_type dt ON dt.oid=NULLIF(t.typbasetype,0) "
+    "LEFT JOIN pg_catalog.pg_namespace dn ON dn.oid=dt.typnamespace "
+    "LEFT JOIN pg_catalog.pg_type et ON et.oid=NULLIF(t.typelem,0) "
+    "LEFT JOIN pg_catalog.pg_namespace en ON en.oid=et.typnamespace "
+    "LEFT JOIN pg_catalog.pg_collation co ON co.oid=a.attcollation "
+    "LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum "
+    "LEFT JOIN pg_catalog.pg_constraint con ON con.conrelid=c.oid AND con.contype='p' "
+    "LEFT JOIN pg_catalog.pg_description des ON des.objoid=c.oid AND des.objsubid=a.attnum "
+    "LEFT JOIN pg_catalog.pg_depend pd ON pd.classid='pg_catalog.pg_type'::pg_catalog.regclass "
+    "AND pd.objid=t.oid AND pd.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND pd.deptype='e' "
+    "LEFT JOIN pg_catalog.pg_extension pe ON pe.oid=pd.refobjid "
+    "WHERE n.nspname=$1::pg_catalog.name AND c.relname=$2::pg_catalog.name "
+    "AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum LIMIT 65536";
+
+static const char vps_index_list_function_sql[] =
+    "SELECT (pg_catalog.row_number() OVER (ORDER BY i.indexrelid)-1)::pg_catalog.text,"
+    "ic.relname::pg_catalog.text,i.indisunique::pg_catalog.text,"
+    "CASE WHEN i.indisprimary THEN 'pk' WHEN con.oid IS NOT NULL THEN 'u' ELSE 'c' END::pg_catalog.text,"
+    "(i.indpred IS NOT NULL)::pg_catalog.text,i.indisvalid::pg_catalog.text,"
+    "i.indisready::pg_catalog.text,i.indimmediate::pg_catalog.text,"
+    "i.indisprimary::pg_catalog.text,(con.contype='x')::pg_catalog.text,"
+    "i.indnullsnotdistinct::pg_catalog.text,am.amname::pg_catalog.text,"
+    "i.indnkeyatts::pg_catalog.text,(i.indnatts-i.indnkeyatts)::pg_catalog.text,"
+    "pg_catalog.pg_get_expr(i.indpred,i.indrelid,true)::pg_catalog.text,"
+    "(i.indexprs IS NOT NULL)::pg_catalog.text "
+    "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+    "JOIN pg_catalog.pg_index i ON i.indrelid=c.oid "
+    "JOIN pg_catalog.pg_class ic ON ic.oid=i.indexrelid "
+    "JOIN pg_catalog.pg_am am ON am.oid=ic.relam "
+    "LEFT JOIN pg_catalog.pg_constraint con ON con.conindid=i.indexrelid "
+    "WHERE n.nspname=$1::pg_catalog.name AND c.relname=$2::pg_catalog.name "
+    "ORDER BY i.indexrelid LIMIT 65536";
+
+static const char vps_index_info_function_sql[] =
+    "SELECT (ord.n-1)::pg_catalog.text,COALESCE(a.attnum,-1)::pg_catalog.text,"
+    "a.attname::pg_catalog.text,"
+    "((i.indoption[ord.n-1]&1)<>0)::pg_catalog.text,"
+    "((i.indoption[ord.n-1]&2)<>0)::pg_catalog.text,"
+    "co.collname::pg_catalog.text,opc.opcname::pg_catalog.text,"
+    "(ord.n>i.indnkeyatts)::pg_catalog.text,"
+    "CASE WHEN a.attnum IS NULL THEN pg_catalog.pg_get_indexdef(i.indexrelid,ord.n,false) ELSE NULL END::pg_catalog.text,"
+    "(ord.n<=i.indnkeyatts)::pg_catalog.text,a.atttypid::pg_catalog.text,"
+    "a.atttypmod::pg_catalog.text,ord.n::pg_catalog.text "
+    "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+    "JOIN pg_catalog.pg_index i ON i.indrelid=c.oid "
+    "JOIN pg_catalog.pg_class ic ON ic.oid=i.indexrelid "
+    "CROSS JOIN LATERAL pg_catalog.generate_series(1,i.indnatts) ord(n) "
+    "LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attnum=i.indkey[ord.n-1] "
+    "LEFT JOIN pg_catalog.pg_collation co ON co.oid=i.indcollation[ord.n-1] "
+    "LEFT JOIN pg_catalog.pg_opclass opc ON opc.oid=i.indclass[ord.n-1] "
+    "WHERE n.nspname=$1::pg_catalog.name AND c.relname=$2::pg_catalog.name "
+    "AND ic.relname=$3::pg_catalog.name ORDER BY ord.n LIMIT 65536";
+
+static const char vps_type_info_function_sql[] =
+    "SELECT n.nspname::pg_catalog.text,t.typname::pg_catalog.text,t.oid::pg_catalog.text,"
+    "t.typtype::pg_catalog.text,t.typcategory::pg_catalog.text,t.typlen::pg_catalog.text,"
+    "t.typbyval::pg_catalog.text,t.typalign::pg_catalog.text,t.typstorage::pg_catalog.text,"
+    "t.typnotnull::pg_catalog.text,t.typbasetype::pg_catalog.text,t.typtypmod::pg_catalog.text,"
+    "t.typelem::pg_catalog.text,t.typarray::pg_catalog.text,c.collname::pg_catalog.text,"
+    "e.extname::pg_catalog.text,e.extversion::pg_catalog.text,"
+    "pg_catalog.format_type(t.oid,NULL)::pg_catalog.text "
+    "FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace "
+    "LEFT JOIN pg_catalog.pg_collation c ON c.oid=t.typcollation "
+    "LEFT JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_type'::pg_catalog.regclass "
+    "AND d.objid=t.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' "
+    "LEFT JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid "
+    "WHERE n.nspname=$1::pg_catalog.name AND t.typname=$2::pg_catalog.name LIMIT 2";
+
+static const char vps_extensions_function_sql[] =
+    "SELECT e.extname::pg_catalog.text,e.extversion::pg_catalog.text,"
+    "n.nspname::pg_catalog.text,e.extnamespace::pg_catalog.text,"
+    "e.extrelocatable::pg_catalog.text,e.extconfig::pg_catalog.text,"
+    "e.extcondition::pg_catalog.text,e.oid::pg_catalog.text "
+    "FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace "
+    "ORDER BY e.extname LIMIT 65536";
+
 static const VpsCatalogQuerySpec vps_catalog_specs[VPS_CATALOG_QUERY_COUNT] = {
     {VPS_CATALOG_QUERY_RELATION, vps_relation_sql,
      sizeof(vps_relation_sql) - 1U, 2U, 12U},
@@ -107,7 +237,19 @@ static const VpsCatalogQuerySpec vps_catalog_specs[VPS_CATALOG_QUERY_COUNT] = {
     {VPS_CATALOG_QUERY_RELATION_POLICY, vps_policy_sql,
      sizeof(vps_policy_sql) - 1U, 1U, 10U},
     {VPS_CATALOG_QUERY_POSTGIS, vps_postgis_sql,
-     sizeof(vps_postgis_sql) - 1U, 1U, 15U}};
+     sizeof(vps_postgis_sql) - 1U, 1U, 15U},
+    {VPS_CATALOG_QUERY_RELATIONS_FUNCTION, vps_relations_function_sql,
+     sizeof(vps_relations_function_sql) - 1U, 1U, 23U},
+    {VPS_CATALOG_QUERY_TABLE_INFO_FUNCTION, vps_table_info_function_sql,
+     sizeof(vps_table_info_function_sql) - 1U, 2U, 25U},
+    {VPS_CATALOG_QUERY_INDEX_LIST_FUNCTION, vps_index_list_function_sql,
+     sizeof(vps_index_list_function_sql) - 1U, 2U, 16U},
+    {VPS_CATALOG_QUERY_INDEX_INFO_FUNCTION, vps_index_info_function_sql,
+     sizeof(vps_index_info_function_sql) - 1U, 3U, 13U},
+    {VPS_CATALOG_QUERY_TYPE_INFO_FUNCTION, vps_type_info_function_sql,
+     sizeof(vps_type_info_function_sql) - 1U, 2U, 18U},
+    {VPS_CATALOG_QUERY_EXTENSIONS_FUNCTION, vps_extensions_function_sql,
+     sizeof(vps_extensions_function_sql) - 1U, 0U, 8U}};
 
 static void vps_metadata_log(VpsMetadataRowSet *rowset,
                              VpsCatalogQuery query,
@@ -923,6 +1065,12 @@ const char *vps_catalog_query_name(VpsCatalogQuery query)
         case VPS_CATALOG_QUERY_KEYS: return "catalog_keys";
         case VPS_CATALOG_QUERY_RELATION_POLICY: return "catalog_policy";
         case VPS_CATALOG_QUERY_POSTGIS: return "catalog_postgis";
+        case VPS_CATALOG_QUERY_RELATIONS_FUNCTION: return "metadata_relations";
+        case VPS_CATALOG_QUERY_TABLE_INFO_FUNCTION: return "metadata_table_info";
+        case VPS_CATALOG_QUERY_INDEX_LIST_FUNCTION: return "metadata_index_list";
+        case VPS_CATALOG_QUERY_INDEX_INFO_FUNCTION: return "metadata_index_info";
+        case VPS_CATALOG_QUERY_TYPE_INFO_FUNCTION: return "metadata_type_info";
+        case VPS_CATALOG_QUERY_EXTENSIONS_FUNCTION: return "metadata_extensions";
         default: return "catalog_unknown";
     }
 }

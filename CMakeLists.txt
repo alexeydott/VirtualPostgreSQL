@@ -540,6 +540,21 @@ target_link_libraries(vps_metadata PUBLIC vps_logging vps_memory)
 vps_apply_strict_warnings(vps_metadata)
 vps_apply_asan(vps_metadata)
 
+add_library(vps_metadata_cache STATIC
+  src/vps_metadata_cache.c
+)
+target_compile_features(vps_metadata_cache PUBLIC c_std_11)
+set_target_properties(vps_metadata_cache PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_metadata_cache PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_metadata_cache PUBLIC vps_error vps_memory)
+vps_apply_strict_warnings(vps_metadata_cache)
+vps_apply_asan(vps_metadata_cache)
+
 add_library(vps_type_registry STATIC
   src/vps_type_registry.c
 )
@@ -1013,6 +1028,7 @@ if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
     vps_identity
     vps_libpq_client
     vps_libpq_client_conninfo
+    vps_metadata_cache
     vps_dml
     vps_transaction
     vps_planner
@@ -1319,6 +1335,16 @@ if(BUILD_TESTING)
   vps_apply_asan(vps_metadata_test)
   add_test(NAME vps_metadata COMMAND vps_metadata_test)
 
+  add_executable(vps_metadata_cache_test
+    tests/unit/vps_metadata_cache_test.c
+  )
+  target_compile_features(vps_metadata_cache_test PRIVATE c_std_11)
+  set_target_properties(vps_metadata_cache_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_metadata_cache_test PRIVATE vps_metadata_cache)
+  vps_apply_strict_warnings(vps_metadata_cache_test)
+  vps_apply_asan(vps_metadata_cache_test)
+  add_test(NAME vps_metadata_cache COMMAND vps_metadata_cache_test)
+
   add_executable(vps_type_registry_test
     tests/unit/vps_type_registry_test.c
   )
@@ -1577,6 +1603,7 @@ if(BUILD_TESTING)
       vps_identity
       vps_libpq_client
       vps_libpq_client_conninfo
+      vps_metadata_cache
       vps_planner
       vps_query_metadata
       vps_query_validation
