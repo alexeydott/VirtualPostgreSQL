@@ -623,6 +623,36 @@ target_link_libraries(vps_query_fingerprint PUBLIC vps_query_metadata)
 vps_apply_strict_warnings(vps_query_fingerprint)
 vps_apply_asan(vps_query_fingerprint)
 
+add_library(vps_type_codec STATIC
+  src/vps_type_codec.c
+)
+target_compile_features(vps_type_codec PUBLIC c_std_11)
+set_target_properties(vps_type_codec PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_type_codec PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_type_codec PUBLIC vps_client vps_type_registry)
+vps_apply_strict_warnings(vps_type_codec)
+vps_apply_asan(vps_type_codec)
+
+add_library(vps_row_identity STATIC
+  src/vps_row_identity.c
+)
+target_compile_features(vps_row_identity PUBLIC c_std_11)
+set_target_properties(vps_row_identity PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_row_identity PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_row_identity PUBLIC vps_client vps_memory)
+vps_apply_strict_warnings(vps_row_identity)
+vps_apply_asan(vps_row_identity)
+
 add_library(vps_libpq_client_metadata STATIC
   src/vps_libpq_client_metadata.c
 )
@@ -767,8 +797,23 @@ if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${VPS_SQLITE_AMALGAMATION_DIR}"
   )
-  target_link_libraries(virtualpostgresql PRIVATE vps_abi)
+  target_link_libraries(virtualpostgresql PRIVATE
+    vps_abi
+    vps_arguments
+    vps_connection_string
+    vps_connection_pool
+    vps_identity
+    vps_libpq_client
+    vps_libpq_client_conninfo
+    vps_query_validation
+    vps_row_identity
+    vps_type_codec
+  )
+  if(WIN32 AND VPS_ENABLE_WINCRED)
+    target_link_libraries(virtualpostgresql PRIVATE vps_wincred_provider)
+  endif()
   vps_apply_strict_warnings(virtualpostgresql)
+  vps_apply_asan(virtualpostgresql)
   if(WIN32)
     target_sources(virtualpostgresql PRIVATE
       src/virtualpostgresql.def
@@ -793,6 +838,22 @@ if(BUILD_TESTING)
   target_link_libraries(vps_abi_layout_test PRIVATE vps_abi)
   vps_apply_strict_warnings(vps_abi_layout_test)
   add_test(NAME vps_abi_layout COMMAND vps_abi_layout_test)
+
+  add_executable(vps_type_codec_test tests/unit/vps_type_codec_test.c)
+  target_compile_features(vps_type_codec_test PRIVATE c_std_11)
+  set_target_properties(vps_type_codec_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_type_codec_test PRIVATE vps_type_codec)
+  vps_apply_strict_warnings(vps_type_codec_test)
+  vps_apply_asan(vps_type_codec_test)
+  add_test(NAME vps_type_codec COMMAND vps_type_codec_test)
+
+  add_executable(vps_row_identity_test tests/unit/vps_row_identity_test.c)
+  target_compile_features(vps_row_identity_test PRIVATE c_std_11)
+  set_target_properties(vps_row_identity_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_row_identity_test PRIVATE vps_row_identity)
+  vps_apply_strict_warnings(vps_row_identity_test)
+  vps_apply_asan(vps_row_identity_test)
+  add_test(NAME vps_row_identity COMMAND vps_row_identity_test)
 
   add_executable(vps_platform_contract_test
     tests/unit/vps_platform_contract_test.c
@@ -1183,11 +1244,28 @@ if(BUILD_TESTING)
     target_compile_features(vps_extension_version_test PRIVATE c_std_11)
     set_target_properties(vps_extension_version_test PROPERTIES C_EXTENSIONS OFF)
     target_include_directories(vps_extension_version_test PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include"
       "${CMAKE_CURRENT_SOURCE_DIR}/src"
       "${VPS_SQLITE_AMALGAMATION_DIR}"
     )
-    target_link_libraries(vps_extension_version_test PRIVATE vps_sqlite_host)
+    target_link_libraries(vps_extension_version_test PRIVATE
+      vps_sqlite_host
+      vps_arguments
+      vps_connection_string
+      vps_connection_pool
+      vps_identity
+      vps_libpq_client
+      vps_libpq_client_conninfo
+      vps_query_validation
+      vps_row_identity
+      vps_type_codec
+    )
+    if(WIN32 AND VPS_ENABLE_WINCRED)
+      target_link_libraries(vps_extension_version_test PRIVATE
+        vps_wincred_provider)
+    endif()
     vps_apply_strict_warnings(vps_extension_version_test)
+    vps_apply_asan(vps_extension_version_test)
     add_test(NAME vps_extension_minimum_host
       COMMAND vps_extension_version_test)
 

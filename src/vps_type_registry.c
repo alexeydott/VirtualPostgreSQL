@@ -208,3 +208,21 @@ const char *vps_codec_name(VpsCodecId codec)
         default: return "unknown";
     }
 }
+
+VpsCodecId vps_type_registry_builtin_oid_codec(uint32_t type_oid)
+{
+    switch (type_oid) {
+        case 16U: return VPS_CODEC_BOOLEAN;
+        case 20U: case 21U: case 23U: case 26U:
+            return VPS_CODEC_INTEGER;
+        case 700U: case 701U: return VPS_CODEC_FLOAT;
+        case 1700U: return VPS_CODEC_NUMERIC_TEXT;
+        case 790U: return VPS_CODEC_MONEY_TEXT;
+        case 17U: return VPS_CODEC_BYTEA;
+        case 1082U: case 1083U: case 1114U: case 1184U: case 1186U:
+        case 1266U: return VPS_CODEC_DATETIME_TEXT;
+        case 2950U: return VPS_CODEC_UUID_TEXT;
+        case 114U: case 3802U: return VPS_CODEC_JSON_TEXT;
+        default: return VPS_CODEC_TEXT;
+    }
+}

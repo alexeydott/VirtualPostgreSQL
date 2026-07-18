@@ -2,11 +2,12 @@
 SQLITE_EXTENSION_INIT1
 
 #include "vps_module.h"
+#include "vps_libpq_client.h"
 
 #include <stdint.h>
 
 #define VPS_MINIMUM_SQLITE_VERSION_NUMBER 3044000
-#define VPS_EXTENSION_VERSION "0.1.0-stage1"
+#define VPS_EXTENSION_VERSION "0.7.0"
 
 static void vps_version_sql(sqlite3_context *context,
                             int argument_count,
@@ -27,13 +28,22 @@ static void vps_build_arch_sql(sqlite3_context *context,
                         SQLITE_STATIC);
 }
 
-static void vps_not_linked_sql(sqlite3_context *context,
-                               int argument_count,
-                               sqlite3_value **arguments)
+static void vps_libpq_version_sql(sqlite3_context *context,
+                                  int argument_count,
+                                  sqlite3_value **arguments)
 {
     (void)argument_count;
     (void)arguments;
-    sqlite3_result_text(context, "not-linked-stage1", -1, SQLITE_STATIC);
+    sqlite3_result_int(context, vps_libpq_client_library_version());
+}
+
+static void vps_embedded_sqlite_sql(sqlite3_context *context,
+                                    int argument_count,
+                                    sqlite3_value **arguments)
+{
+    (void)argument_count;
+    (void)arguments;
+    sqlite3_result_text(context, SQLITE_VERSION, -1, SQLITE_STATIC);
 }
 
 static void vps_capabilities_sql(sqlite3_context *context,
@@ -43,7 +53,7 @@ static void vps_capabilities_sql(sqlite3_context *context,
     (void)argument_count;
     (void)arguments;
     sqlite3_result_text(context,
-                        "stage1,module-v4,xIntegrity,directonly", -1,
+                        "read-only,module-v4,xIntegrity,directonly,async-libpq,single-row,metadata-placeholders", -1,
                         SQLITE_STATIC);
 }
 
@@ -63,6 +73,7 @@ int sqlite3_virtualpostgresql_init(sqlite3 *database,
                                    const sqlite3_api_routines *api)
 {
     int result;
+    VpsModuleContext *module_context;
 
     SQLITE_EXTENSION_INIT2(api);
     if (database == NULL || api == NULL) {
@@ -90,14 +101,14 @@ int sqlite3_virtualpostgresql_init(sqlite3 *database,
     }
     result = sqlite3_create_function(database, "virtualpostgresql_libpq_version",
                                      0, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
-                                     NULL, vps_not_linked_sql, NULL, NULL);
+                                     NULL, vps_libpq_version_sql, NULL, NULL);
     if (result != SQLITE_OK) {
         return result;
     }
     result = sqlite3_create_function(database,
                                      "virtualpostgresql_embedded_sqlite", 0,
                                      SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL,
-                                     vps_not_linked_sql, NULL, NULL);
+                                     vps_embedded_sqlite_sql, NULL, NULL);
     if (result != SQLITE_OK) {
         return result;
     }
@@ -108,6 +119,32 @@ int sqlite3_virtualpostgresql_init(sqlite3 *database,
     if (result != SQLITE_OK) {
         return result;
     }
-    return sqlite3_create_module_v2(database, "VirtualPostgreSQL", &VPS_MODULE,
-                                    NULL, NULL);
+    module_context = vps_module_context_create();
+    if (module_context == NULL) {
+        return SQLITE_NOMEM;
+    }
+    result = sqlite3_create_module_v2(database, "VirtualPostgreSQL",
+                                      &VPS_MODULE, module_context,
+                                      vps_module_context_destroy);
+    if (result != SQLITE_OK) {
+        return result;
+    }
+    result = sqlite3_create_module_v2(database,
+                                      "virtualpostgresql_table_info",
+                                      &VPS_METADATA_MODULE, module_context,
+                                      NULL);
+    if (result != SQLITE_OK) {
+        return result;
+    }
+    result = sqlite3_create_module_v2(database,
+                                      "virtualpostgresql_index_list",
+                                      &VPS_METADATA_MODULE, module_context,
+                                      NULL);
+    if (result != SQLITE_OK) {
+        return result;
+    }
+    return sqlite3_create_module_v2(database,
+                                    "virtualpostgresql_index_info",
+                                    &VPS_METADATA_MODULE, module_context,
+                                    NULL);
 }

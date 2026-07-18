@@ -218,6 +218,7 @@ typedef struct VpsLibpqClient {
 } VpsLibpqClient;
 
 const VpsLibpqClientApi *vps_libpq_client_default_api(void);
+int vps_libpq_client_library_version(void);
 VpsClientStatus vps_libpq_client_init(
     VpsLibpqClient *client,
     const VpsLibpqClientOptions *options);

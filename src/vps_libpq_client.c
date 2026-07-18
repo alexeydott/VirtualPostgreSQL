@@ -518,6 +518,11 @@ const VpsLibpqClientApi *vps_libpq_client_default_api(void)
     return &api;
 }
 
+int vps_libpq_client_library_version(void)
+{
+    return PQlibVersion();
+}
+
 static int vps_libpq_api_valid(const VpsLibpqClientApi *api)
 {
     return api != NULL && api->structure_size >= sizeof(*api) &&

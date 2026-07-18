@@ -53,6 +53,9 @@ VpsMetadataResult vps_type_registry_select(
     const VpsColumnSet *columns,
     size_t column_index,
     VpsTypeSelection *selection);
+/* PostgreSQL built-in OIDs are protocol-stable. This narrow fallback is used
+ * only for server-described query fields that do not yet carry catalog names. */
+VpsCodecId vps_type_registry_builtin_oid_codec(uint32_t type_oid);
 const char *vps_codec_name(VpsCodecId codec);
 
 #endif
