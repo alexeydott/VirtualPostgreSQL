@@ -254,6 +254,31 @@ static int vps_logging_test_whitelist_and_bounds(void)
                                  "mutated_event_fails_closed");
 
     {
+        VpsLogEvent connect_event;
+        passed &= vps_logging_expect(
+            vps_log_event_init(&connect_event, VPS_LOG_LEVEL_DEBUG) ==
+                    VPS_LOG_OK &&
+                vps_log_event_add_uint64(&connect_event,
+                                         VPS_LOG_FIELD_POLL_COUNT, 3U) ==
+                    VPS_LOG_OK &&
+                vps_log_event_add_uint64(&connect_event,
+                                         VPS_LOG_FIELD_WAIT_COUNT, 2U) ==
+                    VPS_LOG_OK &&
+                vps_log_event_add_uint64(&connect_event,
+                                         VPS_LOG_FIELD_PARAMETER_COUNT, 4U) ==
+                    VPS_LOG_OK &&
+                vps_log_event_add_uint64(
+                    &connect_event, VPS_LOG_FIELD_RESULT_FIELD_COUNT, 1U) ==
+                    VPS_LOG_OK,
+            "connect_count_fields");
+        passed &= vps_logging_expect(
+            strcmp(vps_log_field_name(VPS_LOG_FIELD_RETRY_ATTEMPT),
+                   "retry_attempt") == 0 &&
+                strcmp(vps_log_field_name(VPS_LOG_FIELD_BACKOFF_MS),
+                       "backoff_ms") == 0,
+            "retry_field_names");
+    }
+    {
         VpsLogEvent capacity_event;
         size_t index;
         passed &= vps_logging_expect(
@@ -318,6 +343,54 @@ static int vps_logging_test_sink_isolation(void)
     return passed;
 }
 
+static int vps_logging_test_debug_diagnostics(void)
+{
+    static const char primary[] =
+        "duplicate key value \"synthetic-secret\" violates unique constraint \"fixture_uq\"";
+    static const char expected_primary[] =
+        "duplicate key value ? violates unique constraint ?";
+    static const char sql[] = "SELECT $1::pg_catalog.int4";
+    static const char sensitive_primary[] =
+        "password authentication failed for user \"admin\"";
+    char storage[VPS_LOG_MAX_STRING_LENGTH + 1U];
+    VpsLogEvent event;
+    VpsLogResult sql_result;
+    int passed = 1;
+    passed &= vps_logging_expect(
+        vps_log_event_init(&event, VPS_LOG_LEVEL_DEBUG) == VPS_LOG_OK &&
+            vps_log_event_add_primary_message(
+                &event, primary, sizeof(primary) - 1U, storage,
+                sizeof(storage)) == VPS_LOG_OK &&
+            event.field_count == 1U &&
+            event.fields[0].key == VPS_LOG_FIELD_PRIMARY_MESSAGE &&
+            event.fields[0].value.string_value.length ==
+                sizeof(expected_primary) - 1U &&
+            memcmp(event.fields[0].value.string_value.data,
+                   expected_primary, sizeof(expected_primary) - 1U) == 0,
+        "primary_message_redacted");
+    sql_result = vps_log_event_add_debug_sql(
+        &event, sql, sizeof(sql) - 1U);
+#if defined(VPS_DEBUG)
+    passed &= vps_logging_expect(
+        sql_result == VPS_LOG_OK && event.field_count == 2U &&
+            event.fields[1].key == VPS_LOG_FIELD_SQL_TEXT &&
+            event.fields[1].value.string_value.data == sql,
+        "debug_sql_enabled");
+#else
+    passed &= vps_logging_expect(
+        sql_result == VPS_LOG_REDACTED && event.field_count == 1U,
+        "release_sql_disabled");
+#endif
+    passed &= vps_logging_expect(
+        vps_log_event_init(&event, VPS_LOG_LEVEL_DEBUG) == VPS_LOG_OK &&
+            vps_log_event_add_primary_message(
+                &event, sensitive_primary, sizeof(sensitive_primary) - 1U,
+                storage, sizeof(storage)) == VPS_LOG_REDACTED &&
+            event.fields[0].redacted,
+        "sensitive_primary_fully_redacted");
+    return passed;
+}
+
 static int vps_logging_test_level_parser(void)
 {
     static const char *const names[] = {"debug", "info", "warn", "error",
@@ -348,9 +421,10 @@ int main(void)
     passed &= vps_logging_test_denylist();
     passed &= vps_logging_test_whitelist_and_bounds();
     passed &= vps_logging_test_sink_isolation();
+    passed &= vps_logging_test_debug_diagnostics();
     passed &= vps_logging_test_level_parser();
     (void)printf("[logging] level=info fields=whitelist,count "
-                 "redaction=passed sink_isolation=passed cases=5 status=%s\n",
+                 "redaction=passed sink_isolation=passed cases=6 status=%s\n",
                  passed ? "passed" : "failed");
     return passed ? 0 : 1;
 }

@@ -222,6 +222,14 @@ static VpsPlatformStatus vps_windows_socket_wait(
     if ((descriptor.revents & (POLLWRNORM | POLLOUT)) != 0) {
         *ready_interest = (VpsWaitInterest)(*ready_interest | VPS_WAIT_WRITE);
     }
+    /*
+     * A terminal socket event must wake the protocol state machine.  It will
+     * ask libpq for the authoritative outcome; treating HUP/ERR/NVAL as a
+     * spurious wake can otherwise spin until the retry guard is exhausted.
+     */
+    if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+        *ready_interest = (VpsWaitInterest)(*ready_interest | interest);
+    }
     return VPS_PLATFORM_OK;
 }
 

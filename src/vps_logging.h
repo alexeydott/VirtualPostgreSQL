@@ -6,6 +6,7 @@
 
 #define VPS_LOG_MAX_FIELDS 16U
 #define VPS_LOG_MAX_STRING_LENGTH 128U
+#define VPS_LOG_MAX_SQL_TEXT_LENGTH 4096U
 
 typedef enum VpsLogLevel {
     VPS_LOG_LEVEL_DEBUG = 0,
@@ -55,7 +56,15 @@ typedef enum VpsLogFieldKey {
     VPS_LOG_FIELD_CERTIFICATE_STATUS = 27,
     VPS_LOG_FIELD_CHANNEL_BINDING_STATUS = 28,
     VPS_LOG_FIELD_PARAMETER = 29,
-    VPS_LOG_FIELD_EXPECTED_CLASS = 30
+    VPS_LOG_FIELD_EXPECTED_CLASS = 30,
+    VPS_LOG_FIELD_POLL_COUNT = 31,
+    VPS_LOG_FIELD_WAIT_COUNT = 32,
+    VPS_LOG_FIELD_PARAMETER_COUNT = 33,
+    VPS_LOG_FIELD_RESULT_FIELD_COUNT = 34,
+    VPS_LOG_FIELD_RETRY_ATTEMPT = 35,
+    VPS_LOG_FIELD_BACKOFF_MS = 36,
+    VPS_LOG_FIELD_PRIMARY_MESSAGE = 37,
+    VPS_LOG_FIELD_SQL_TEXT = 38
 } VpsLogFieldKey;
 
 typedef enum VpsLogFieldType {
@@ -116,6 +125,22 @@ VpsLogResult vps_log_event_add_string(VpsLogEvent *event,
                                       VpsLogFieldKey key,
                                       const char *value,
                                       size_t value_length);
+/*
+ * Adds a bounded redacted PostgreSQL primary message to a DEBUG event.
+ * Quoted spans and non-printable/non-ASCII bytes become '?'; sensitive-token
+ * detection can redact the whole field. storage is caller-owned until the
+ * synchronous sink returns. DETAIL/HINT/CONTEXT must never be passed here.
+ */
+VpsLogResult vps_log_event_add_primary_message(
+    VpsLogEvent *event,
+    const char *value,
+    size_t value_length,
+    char *storage,
+    size_t storage_size);
+/* Adds raw SQL only in a VPS_DEBUG build and only to a DEBUG event. */
+VpsLogResult vps_log_event_add_debug_sql(VpsLogEvent *event,
+                                         const char *sql,
+                                         size_t sql_length);
 VpsLogResult vps_log_event_add_uint64(VpsLogEvent *event,
                                       VpsLogFieldKey key,
                                       uint64_t value);

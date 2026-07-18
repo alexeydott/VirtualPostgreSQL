@@ -30,7 +30,9 @@ if (Test-Path -LiteralPath $gitDirectory) {
     if ($LASTEXITCODE -ne 0) {
         throw '[source-tree] unable to enumerate repository files'
     }
-    $files = @($listed | Where-Object { $_ } | ForEach-Object { Join-Path $rootPath $_ })
+    $files = @($listed | Where-Object { $_ } |
+        ForEach-Object { Join-Path $rootPath $_ } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
 } else {
     $files = @(Get-ChildItem -LiteralPath $rootPath -File -Recurse | Where-Object {
         $relativeCandidate = Get-VpsRelativePath -Root $rootPath -Path $_.FullName
@@ -52,9 +54,9 @@ if (Test-Selected 'PlatformHeaders') {
     $platformBoundaryFiles = @(
         'src/vps_windows.c',
         'src/vps_wincred_provider.c',
+        'src/vps_libpq_client.c',
         'src/vps_libpq_client_conninfo.c',
-        'src/vps_libpq_client_tls.c',
-        'src/vps_libpq_client_session.c'
+        'src/vps_libpq_client_tls.c'
     )
     foreach ($file in $files) {
         $relative = Get-VpsRelativePath -Root $rootPath -Path $file

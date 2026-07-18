@@ -18,7 +18,7 @@ static int vps_log_event_level_is_valid(VpsLogLevel level)
 static int vps_log_field_key_is_valid(VpsLogFieldKey key)
 {
     return key >= VPS_LOG_FIELD_OPERATION &&
-           key <= VPS_LOG_FIELD_EXPECTED_CLASS;
+           key <= VPS_LOG_FIELD_SQL_TEXT;
 }
 
 static int vps_log_field_requires_string(VpsLogFieldKey key)
@@ -43,6 +43,10 @@ static int vps_log_field_requires_string(VpsLogFieldKey key)
     case VPS_LOG_FIELD_CHANNEL_BINDING_STATUS:
     case VPS_LOG_FIELD_PARAMETER:
     case VPS_LOG_FIELD_EXPECTED_CLASS:
+    case VPS_LOG_FIELD_PRIMARY_MESSAGE:
+#if defined(VPS_DEBUG)
+    case VPS_LOG_FIELD_SQL_TEXT:
+#endif
         return 1;
     default:
         return 0;
@@ -64,6 +68,12 @@ static int vps_log_field_requires_uint64(VpsLogFieldKey key)
     case VPS_LOG_FIELD_GENERATION:
     case VPS_LOG_FIELD_CONFIGURATION_GENERATION:
     case VPS_LOG_FIELD_SSL_IN_USE:
+    case VPS_LOG_FIELD_POLL_COUNT:
+    case VPS_LOG_FIELD_WAIT_COUNT:
+    case VPS_LOG_FIELD_PARAMETER_COUNT:
+    case VPS_LOG_FIELD_RESULT_FIELD_COUNT:
+    case VPS_LOG_FIELD_RETRY_ATTEMPT:
+    case VPS_LOG_FIELD_BACKOFF_MS:
         return 1;
     default:
         return 0;
@@ -189,6 +199,21 @@ static int vps_log_string_matches_key(VpsLogFieldKey key,
         key == VPS_LOG_FIELD_QUERY_FINGERPRINT) {
         return vps_log_fingerprint_is_valid(value, value_length);
     }
+    if (key == VPS_LOG_FIELD_PRIMARY_MESSAGE) {
+        size_t index;
+        if (value_length == 0U) return 0;
+        for (index = 0U; index < value_length; ++index) {
+            const unsigned char current = (unsigned char)value[index];
+            if (current < 0x20U || current > 0x7eU || current == '\'' ||
+                current == '"') {
+                return 0;
+            }
+        }
+        return 1;
+    }
+#if defined(VPS_DEBUG)
+    if (key == VPS_LOG_FIELD_SQL_TEXT) return value_length != 0U;
+#endif
     return vps_log_value_is_safe_token(value, value_length);
 }
 
@@ -229,8 +254,13 @@ static int vps_log_event_is_valid(const VpsLogEvent *event)
         if (field->type == VPS_LOG_FIELD_TYPE_STRING) {
             if (!vps_log_field_requires_string(field->key) ||
                 field->value.string_value.data == NULL ||
-                field->value.string_value.length >
-                    VPS_LOG_MAX_STRING_LENGTH ||
+                (field->key == VPS_LOG_FIELD_SQL_TEXT
+                     ? field->value.string_value.length == 0U ||
+                           field->value.string_value.length >
+                               VPS_LOG_MAX_SQL_TEXT_LENGTH ||
+                           event->level != VPS_LOG_LEVEL_DEBUG
+                     : field->value.string_value.length >
+                           VPS_LOG_MAX_STRING_LENGTH) ||
                 !vps_log_string_matches_key(
                     field->key, field->value.string_value.data,
                     field->value.string_value.length, field->redacted)) {
@@ -279,7 +309,8 @@ VpsLogResult vps_log_event_add_string(VpsLogEvent *event,
 
     if (event == NULL || !vps_log_event_level_is_valid(event->level) ||
         !vps_log_field_key_is_valid(key) ||
-        !vps_log_field_requires_string(key) || value == NULL) {
+        !vps_log_field_requires_string(key) ||
+        key == VPS_LOG_FIELD_SQL_TEXT || value == NULL) {
         return VPS_LOG_INVALID_ARGUMENT;
     }
     if (value_length > VPS_LOG_MAX_STRING_LENGTH) {
@@ -340,6 +371,90 @@ VpsLogResult vps_log_event_add_uint64(VpsLogEvent *event,
     field->value.uint64_value = value;
     event->field_count += 1U;
     return VPS_LOG_OK;
+}
+
+VpsLogResult vps_log_event_add_primary_message(
+    VpsLogEvent *event,
+    const char *value,
+    size_t value_length,
+    char *storage,
+    size_t storage_size)
+{
+    size_t input_index;
+    size_t output_length = 0U;
+    char quote = '\0';
+    int quote_marker_written = 0;
+    if (event == NULL || event->level != VPS_LOG_LEVEL_DEBUG ||
+        value == NULL || value_length == 0U || storage == NULL ||
+        storage_size < 2U) {
+        return VPS_LOG_INVALID_ARGUMENT;
+    }
+    for (input_index = 0U;
+         input_index < value_length &&
+         output_length + 1U < storage_size &&
+         output_length < VPS_LOG_MAX_STRING_LENGTH;
+         ++input_index) {
+        const unsigned char current = (unsigned char)value[input_index];
+        if (quote != '\0') {
+            if ((char)current == quote) {
+                quote = '\0';
+                quote_marker_written = 0;
+            } else if (!quote_marker_written) {
+                storage[output_length++] = '?';
+                quote_marker_written = 1;
+            }
+            continue;
+        }
+        if (current == '\'' || current == '"') {
+            quote = (char)current;
+            storage[output_length++] = '?';
+            quote_marker_written = 1;
+        } else if (current < 0x20U || current > 0x7eU) {
+            storage[output_length++] = '?';
+        } else {
+            storage[output_length++] = (char)current;
+        }
+    }
+    while (output_length != 0U && storage[output_length - 1U] == ' ') {
+        output_length -= 1U;
+    }
+    storage[output_length] = '\0';
+    if (output_length == 0U) return VPS_LOG_MALFORMED_VALUE;
+    return vps_log_event_add_string(event, VPS_LOG_FIELD_PRIMARY_MESSAGE,
+                                    storage, output_length);
+}
+
+VpsLogResult vps_log_event_add_debug_sql(VpsLogEvent *event,
+                                         const char *sql,
+                                         size_t sql_length)
+{
+    if (event == NULL || event->level != VPS_LOG_LEVEL_DEBUG || sql == NULL ||
+        sql_length == 0U || sql_length > VPS_LOG_MAX_SQL_TEXT_LENGTH) {
+        return sql_length > VPS_LOG_MAX_SQL_TEXT_LENGTH
+                   ? VPS_LOG_LIMIT_EXCEEDED
+                   : VPS_LOG_INVALID_ARGUMENT;
+    }
+#if defined(VPS_DEBUG)
+    VpsLogField *field;
+    if (event->field_count >= VPS_LOG_MAX_FIELDS) {
+        return VPS_LOG_LIMIT_EXCEEDED;
+    }
+    if (vps_log_event_has_key(event, VPS_LOG_FIELD_SQL_TEXT)) {
+        return VPS_LOG_DUPLICATE_FIELD;
+    }
+    field = &event->fields[event->field_count++];
+    field->key = VPS_LOG_FIELD_SQL_TEXT;
+    field->type = VPS_LOG_FIELD_TYPE_STRING;
+    field->redacted = 0;
+    field->value.string_value.data = sql;
+    field->value.string_value.length = sql_length;
+    return VPS_LOG_OK;
+#else
+    (void)event;
+    (void)sql;
+    (void)sql_length;
+    return VPS_LOG_REDACTED;
+#endif
 }
 
 VpsLogResult vps_logger_init(VpsLogger *logger,
@@ -450,7 +565,8 @@ const char *vps_log_field_name(VpsLogFieldKey key)
         "argument",       "presence_mask", "provider_id", "generation",
         "configuration_generation", "tls_mode", "ssl_in_use",
         "certificate_status", "channel_binding_status", "parameter",
-        "expected_class"};
+        "expected_class", "poll_count", "wait_count", "parameter_count",
+        "result_field_count", "retry_attempt", "backoff_ms"};
 
     if (!vps_log_field_key_is_valid(key)) {
         return "unknown";

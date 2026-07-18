@@ -19,21 +19,9 @@ foreach ($name in $requiredEnvironment) {
     }
 }
 
-$root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$buildCandidate = [IO.Path]::GetFullPath((Join-Path $root $BuildDirectory))
-$rootPrefix = $root.TrimEnd([IO.Path]::DirectorySeparatorChar) +
-    [IO.Path]::DirectorySeparatorChar
-if (-not $buildCandidate.StartsWith(
-        $rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw '[session-stand] build directory must remain inside the repository root'
-}
-$build = (Resolve-Path -LiteralPath $buildCandidate -ErrorAction Stop).Path
-$probe = Join-Path $build 'vps_libpq_client_session_integration_test.exe'
-if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) {
-    throw "[session-stand] integration probe is missing: $probe"
-}
-& $probe
+& (Join-Path $PSScriptRoot 'test-async-connect-stand.ps1') `
+    -Contour Local -BuildDirectory $BuildDirectory
 if ($LASTEXITCODE -ne 0) {
     throw '[session-stand] session baseline contour failed'
 }
-Write-Output '[session-stand] status=passed setting_calls=33 user_data_queries=0'
+Write-Output '[session-stand] status=passed transport=async user_data_queries=0'

@@ -25,7 +25,9 @@ typedef enum VpsWaitPhase {
     VPS_WAIT_PHASE_LOCK = 2,
     VPS_WAIT_PHASE_POOL = 3,
     VPS_WAIT_PHASE_FETCH_IDLE = 4,
-    VPS_WAIT_PHASE_CANCEL = 5
+    VPS_WAIT_PHASE_RESET = 5,
+    VPS_WAIT_PHASE_PING = 6,
+    VPS_WAIT_PHASE_CANCEL = 7
 } VpsWaitPhase;
 
 typedef enum VpsInterruptProbeResult {

@@ -11,6 +11,8 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+add_compile_definitions($<$<CONFIG:Debug>:VPS_DEBUG=1>)
+
 set(CMAKE_MSVC_RUNTIME_LIBRARY
   "MultiThreaded$<$<CONFIG:Debug>:Debug>"
   CACHE STRING "Use the static MSVC runtime" FORCE)
@@ -375,6 +377,58 @@ target_link_libraries(vps_session PUBLIC
 vps_apply_strict_warnings(vps_session)
 vps_apply_asan(vps_session)
 
+add_library(vps_client STATIC
+  src/vps_client.c
+)
+target_compile_features(vps_client PUBLIC c_std_11)
+set_target_properties(vps_client PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_client PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_client PUBLIC
+  vps_error
+  vps_logging
+  vps_memory
+)
+vps_apply_strict_warnings(vps_client)
+vps_apply_asan(vps_client)
+
+add_library(vps_connection_pool STATIC
+  src/vps_connection_pool.c
+)
+target_compile_features(vps_connection_pool PUBLIC c_std_11)
+set_target_properties(vps_connection_pool PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_connection_pool PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_connection_pool PUBLIC
+  vps_deadline
+  vps_memory
+  vps_platform
+)
+vps_apply_strict_warnings(vps_connection_pool)
+vps_apply_asan(vps_connection_pool)
+
+add_library(vps_retry STATIC
+  src/vps_retry.c
+)
+target_compile_features(vps_retry PUBLIC c_std_11)
+set_target_properties(vps_retry PROPERTIES C_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
+target_include_directories(vps_retry PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_retry PUBLIC vps_error vps_logging)
+vps_apply_strict_warnings(vps_retry)
+vps_apply_asan(vps_retry)
+
 if(EXISTS "${VPS_LIBPQ_INCLUDE_DIR}/libpq-fe.h" AND
    EXISTS "${VPS_LIBPQ_LIBRARY_DIR}/libpq.lib")
   add_library(vps_libpq_client_conninfo STATIC
@@ -429,20 +483,27 @@ if(EXISTS "${VPS_LIBPQ_INCLUDE_DIR}/libpq-fe.h" AND
   vps_apply_strict_warnings(vps_libpq_client_tls)
   vps_apply_asan(vps_libpq_client_tls)
 
-  add_library(vps_libpq_client_session STATIC
-    src/vps_libpq_client_session.c
+  add_library(vps_libpq_client STATIC
+    src/vps_libpq_client.c
+    src/vps_libpq_client_health.c
+    src/vps_libpq_client_statement.c
   )
-  target_compile_features(vps_libpq_client_session PUBLIC c_std_11)
-  set_target_properties(vps_libpq_client_session PROPERTIES
+  target_compile_features(vps_libpq_client PUBLIC c_std_11)
+  set_target_properties(vps_libpq_client PROPERTIES
     C_EXTENSIONS OFF
     POSITION_INDEPENDENT_CODE ON
   )
-  target_include_directories(vps_libpq_client_session
+  target_include_directories(vps_libpq_client
     PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
     PRIVATE "${VPS_LIBPQ_INCLUDE_DIR}"
   )
-  target_link_libraries(vps_libpq_client_session
-    PUBLIC vps_session
+  target_link_libraries(vps_libpq_client
+    PUBLIC
+      vps_client
+      vps_deadline
+      vps_identity
+      vps_session
+      vps_libpq_client_tls
     PRIVATE
       "${VPS_LIBPQ_LIBRARY_DIR}/libpq.lib"
       "${VPS_LIBPQ_LIBRARY_DIR}/pgcommon.lib"
@@ -452,8 +513,8 @@ if(EXISTS "${VPS_LIBPQ_INCLUDE_DIR}/libpq-fe.h" AND
       "${VPS_ZLIB_LIBRARY_DIR}/zlib.lib"
       ws2_32 secur32 crypt32 advapi32 user32 shell32
   )
-  vps_apply_strict_warnings(vps_libpq_client_session)
-  vps_apply_asan(vps_libpq_client_session)
+  vps_apply_strict_warnings(vps_libpq_client)
+  vps_apply_asan(vps_libpq_client)
 else()
   message(FATAL_ERROR
     "[libpq] pinned static dependency contour is incomplete: ${VPS_PINNED_DEPENDENCY_ROOT}")
@@ -665,6 +726,82 @@ if(BUILD_TESTING)
   vps_apply_asan(vps_session_test)
   add_test(NAME vps_session COMMAND vps_session_test)
 
+  add_executable(vps_client_test
+    tests/unit/vps_client_test.c
+  )
+  target_compile_features(vps_client_test PRIVATE c_std_11)
+  set_target_properties(vps_client_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_client_test PRIVATE vps_client)
+  vps_apply_strict_warnings(vps_client_test)
+  vps_apply_asan(vps_client_test)
+  add_test(NAME vps_client COMMAND vps_client_test)
+
+  add_executable(vps_connection_pool_test
+    tests/unit/vps_connection_pool_test.c
+  )
+  target_compile_features(vps_connection_pool_test PRIVATE c_std_11)
+  set_target_properties(vps_connection_pool_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_connection_pool_test PRIVATE vps_connection_pool)
+  vps_apply_strict_warnings(vps_connection_pool_test)
+  vps_apply_asan(vps_connection_pool_test)
+  add_test(NAME vps_connection_pool COMMAND vps_connection_pool_test)
+
+  add_executable(vps_retry_test tests/unit/vps_retry_test.c)
+  target_compile_features(vps_retry_test PRIVATE c_std_11)
+  set_target_properties(vps_retry_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_retry_test PRIVATE vps_retry)
+  vps_apply_strict_warnings(vps_retry_test)
+  vps_apply_asan(vps_retry_test)
+  add_test(NAME vps_retry COMMAND vps_retry_test)
+
+  add_executable(vps_libpq_client_test
+    tests/unit/vps_libpq_client_test.c
+  )
+  target_compile_features(vps_libpq_client_test PRIVATE c_std_11)
+  set_target_properties(vps_libpq_client_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_libpq_client_test PRIVATE vps_libpq_client)
+  vps_apply_strict_warnings(vps_libpq_client_test)
+  vps_apply_asan(vps_libpq_client_test)
+  add_test(NAME vps_libpq_client COMMAND vps_libpq_client_test)
+
+  add_executable(vps_client_stream_performance_test
+    tests/performance/vps_client_stream_performance_test.c
+  )
+  target_compile_features(vps_client_stream_performance_test PRIVATE c_std_11)
+  set_target_properties(vps_client_stream_performance_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_client_stream_performance_test PRIVATE vps_client)
+  vps_apply_strict_warnings(vps_client_stream_performance_test)
+  vps_apply_asan(vps_client_stream_performance_test)
+  add_test(NAME vps_client_stream_performance COMMAND vps_client_stream_performance_test)
+  set_tests_properties(vps_client_stream_performance PROPERTIES LABELS "performance")
+
+  add_executable(vps_libpq_client_connect_integration_test
+    tests/integration/vps_libpq_client_connect_integration_test.c
+  )
+  target_compile_features(vps_libpq_client_connect_integration_test
+    PRIVATE c_std_11)
+  set_target_properties(vps_libpq_client_connect_integration_test PROPERTIES
+    C_EXTENSIONS OFF
+  )
+  if(MSVC)
+    target_compile_definitions(
+      vps_libpq_client_connect_integration_test PRIVATE
+      _CRT_SECURE_NO_WARNINGS
+    )
+  endif()
+  target_link_libraries(vps_libpq_client_connect_integration_test PRIVATE
+    vps_libpq_client
+    vps_connection_pool
+  )
+  vps_apply_strict_warnings(vps_libpq_client_connect_integration_test)
+  vps_apply_asan(vps_libpq_client_connect_integration_test)
+  add_test(NAME vps_libpq_client_connect_integration
+    COMMAND vps_libpq_client_connect_integration_test)
+  set_tests_properties(vps_libpq_client_connect_integration PROPERTIES
+    SKIP_RETURN_CODE 77
+    LABELS "async-connect-integration"
+  )
+
   add_executable(vps_libpq_client_tls_integration_test
     tests/integration/vps_libpq_client_tls_integration_test.c
   )
@@ -690,36 +827,6 @@ if(BUILD_TESTING)
   set_tests_properties(vps_libpq_client_tls_integration PROPERTIES
     SKIP_RETURN_CODE 77
     LABELS "tls-integration"
-  )
-
-  add_executable(vps_libpq_client_session_integration_test
-    tests/integration/vps_libpq_client_session_integration_test.c
-  )
-  target_compile_features(vps_libpq_client_session_integration_test PRIVATE
-    c_std_11
-  )
-  set_target_properties(vps_libpq_client_session_integration_test PROPERTIES
-    C_EXTENSIONS OFF
-  )
-  target_include_directories(vps_libpq_client_session_integration_test PRIVATE
-    "${VPS_LIBPQ_INCLUDE_DIR}"
-  )
-  if(MSVC)
-    target_compile_definitions(
-      vps_libpq_client_session_integration_test PRIVATE
-      _CRT_SECURE_NO_WARNINGS
-    )
-  endif()
-  target_link_libraries(vps_libpq_client_session_integration_test PRIVATE
-    vps_libpq_client_session
-  )
-  vps_apply_strict_warnings(vps_libpq_client_session_integration_test)
-  vps_apply_asan(vps_libpq_client_session_integration_test)
-  add_test(NAME vps_libpq_client_session_integration
-    COMMAND vps_libpq_client_session_integration_test)
-  set_tests_properties(vps_libpq_client_session_integration PROPERTIES
-    SKIP_RETURN_CODE 77
-    LABELS "session-integration"
   )
 
   if(TARGET vps_wincred_provider)

@@ -236,7 +236,8 @@ VpsDeadlineStatus vps_socket_wait_execute(
 const char *vps_wait_phase_name(VpsWaitPhase phase)
 {
     static const char *const names[] = {"connect", "statement", "lock",
-                                        "pool", "fetch_idle", "cancel"};
+                                        "pool", "fetch_idle", "reset",
+                                        "ping", "cancel"};
 
     if (!vps_wait_phase_is_valid(phase)) {
         return "unknown";
