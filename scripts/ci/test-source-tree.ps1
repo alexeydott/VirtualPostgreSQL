@@ -53,6 +53,7 @@ if (Test-Selected 'PlatformHeaders') {
     $forbiddenInclude = '(?im)^\s*#\s*include\s*[<"](?:windows\.h|winsock2?\.h|ws2tcpip\.h|bcrypt\.h|unistd\.h|pthread\.h|android/[^>"]+|libpq-fe\.h)[>"]'
     $platformBoundaryFiles = @(
         'src/vps_windows.c',
+        'src/vps_windows_temp.c',
         'src/vps_wincred_provider.c',
         'src/vps_libpq_client.c',
         'src/vps_libpq_client_conninfo.c',

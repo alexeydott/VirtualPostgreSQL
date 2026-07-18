@@ -2,6 +2,9 @@
 SQLITE_EXTENSION_INIT1
 
 #include "vps_module.h"
+#if defined(VPS_ENABLE_QUERY_MATERIALIZATION)
+#include "vps_embedded_sqlite.h"
+#endif
 #include "vps_libpq_client.h"
 #include "virtualpostgresql/vps_api.h"
 
@@ -59,7 +62,12 @@ static void vps_embedded_sqlite_sql(sqlite3_context *context,
 {
     (void)argument_count;
     (void)arguments;
-    sqlite3_result_text(context, SQLITE_VERSION, -1, SQLITE_STATIC);
+#if defined(VPS_ENABLE_QUERY_MATERIALIZATION)
+    sqlite3_result_text(context, vps_embedded_sqlite_version(), -1,
+                        SQLITE_TRANSIENT);
+#else
+    sqlite3_result_text(context, "disabled", -1, SQLITE_STATIC);
+#endif
 }
 
 static void vps_capabilities_sql(sqlite3_context *context,
@@ -68,9 +76,15 @@ static void vps_capabilities_sql(sqlite3_context *context,
 {
     (void)argument_count;
     (void)arguments;
+#if defined(VPS_ENABLE_QUERY_MATERIALIZATION)
+    sqlite3_result_text(context,
+                        "read-only,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,query-materialization-memory,query-materialization-temp,metadata-placeholders", -1,
+                        SQLITE_STATIC);
+#else
     sqlite3_result_text(context,
                         "read-only,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,metadata-placeholders", -1,
                         SQLITE_STATIC);
+#endif
 }
 
 int vps_extension_check_host_version(int version_number)

@@ -332,7 +332,48 @@ static int vps_runtime_contour(sqlite3 *database,
                              "0");
     passed &= vps_query_contains(
         database, "EXPLAIN QUERY PLAN SELECT id FROM vps_planner WHERE id=2",
-        "VIRTUAL TABLE INDEX 1:");
+        "VIRTUAL TABLE INDEX 2:");
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_materialized_memory USING "
+        "VirtualPostgreSQL(connstr=%Q,source=query,query=%Q,mode=ro,"
+        "key_columns=id,query_indexes=by_id=id;by_label=label,"
+        "query_materialization=memory)", connstr,
+        "SELECT * FROM (VALUES "
+        "(1::pg_catalog.int8,NULL::pg_catalog.text,'1.250'::pg_catalog.numeric,'\\x00ff'::pg_catalog.bytea),"
+        "(2::pg_catalog.int8,'two'::pg_catalog.text,'2.500'::pg_catalog.numeric,'\\x'::pg_catalog.bytea),"
+        "(3::pg_catalog.int8,'three'::pg_catalog.text,'3.750'::pg_catalog.numeric,'\\x4100'::pg_catalog.bytea)) "
+        "AS q(id,label,amount,payload)");
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_materialized_temp USING "
+        "VirtualPostgreSQL(connstr=%Q,source=query,query=%Q,mode=ro,"
+        "key_columns=id,query_indexes=by_id=id;by_label=label,"
+        "query_materialization=temp)", connstr,
+        "SELECT * FROM (VALUES "
+        "(1::pg_catalog.int8,NULL::pg_catalog.text,'1.250'::pg_catalog.numeric,'\\x00ff'::pg_catalog.bytea),"
+        "(2::pg_catalog.int8,'two'::pg_catalog.text,'2.500'::pg_catalog.numeric,'\\x'::pg_catalog.bytea),"
+        "(3::pg_catalog.int8,'three'::pg_catalog.text,'3.750'::pg_catalog.numeric,'\\x4100'::pg_catalog.bytea)) "
+        "AS q(id,label,amount,payload)");
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST(id AS TEXT)||':'||label||':'||amount||':'||hex(payload) "
+        "FROM vps_materialized_memory WHERE id=2", "2:two:2.500:");
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST(count(*) AS TEXT) FROM vps_materialized_memory m "
+        "JOIN vps_materialized_temp t USING(id) "
+        "WHERE m.label IS t.label AND m.amount=t.amount "
+        "AND m.payload IS t.payload", "3");
+    passed &= vps_query_text(
+        database,
+        "SELECT group_concat(id, ',') FROM "
+        "(SELECT id FROM vps_materialized_memory ORDER BY id LIMIT 2 OFFSET 1)",
+        "2,3");
     passed &= sqlite3_prepare_v2(database,
                                 "SELECT oid FROM vps_table LIMIT 2", -1,
                                 &left, NULL) == SQLITE_OK;
@@ -522,9 +563,15 @@ int main(int argument_count, char **arguments)
                                  expected_architecture);
         passed &= vps_query_positive_integer(
             database, "SELECT virtualpostgresql_libpq_version()");
-        passed &= vps_query_text(database,
-                                 "SELECT virtualpostgresql_embedded_sqlite()",
-                                 SQLITE_VERSION);
+        passed &= vps_query_text(
+            database,
+            "SELECT CAST((instr(virtualpostgresql_capabilities(),"
+            "'query-materialization-memory')>0 AND "
+            "virtualpostgresql_embedded_sqlite()=sqlite_version()) OR "
+            "(instr(virtualpostgresql_capabilities(),"
+            "'query-materialization-memory')=0 AND "
+            "virtualpostgresql_embedded_sqlite()='disabled') AS TEXT)",
+            "1");
         passed &= vps_query_text(
             database,
             "SELECT CAST(instr(virtualpostgresql_capabilities(), 'single-row') > 0 AS TEXT)",

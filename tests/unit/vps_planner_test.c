@@ -119,11 +119,13 @@ static int vps_test_recheck_order_limit_and_cost(void)
     request.estimated_base_rows = 8000U;
     request.relation_pages = 100U;
     request.query_index_prefix = 2U;
+    request.query_index_ordinal = 3U;
     CHECK(vps_planner_compile(&request, &plan) == VPS_PLANNER_OK);
     CHECK((plan.flags & VPS_PLAN_FLAG_HAS_RECHECK) != 0U);
     CHECK((plan.flags & VPS_PLAN_FLAG_LIMIT_CONSUMED) == 0U);
     CHECK((plan.flags & VPS_PLAN_FLAG_ORDER_CONSUMED) == 0U);
     CHECK(plan.selected_index_prefix == 2U);
+    CHECK(plan.selected_index_ordinal == 3U);
     constraints[0].column = 0;
     constraints[0].value_class = VPS_PLAN_VALUE_INTEGER;
     order.column = 0U;

@@ -169,6 +169,8 @@ static int test_connection_modes(void)
     static const VpsArgumentInput profile_inputs[] = {
         INPUT_LITERAL("profile=local"), INPUT_LITERAL("source=query"),
         INPUT_LITERAL("query_profile=approved_report"),
+        INPUT_LITERAL("query_indexes=by_id=id"),
+        INPUT_LITERAL("query_materialization=memory"),
         INPUT_LITERAL("mode=ro")};
     static const VpsArgumentInput connstr_inputs[] = {
         INPUT_LITERAL("connstr=synthetic_conn_marker"),
@@ -199,6 +201,10 @@ static int test_connection_modes(void)
                                        sizeof(profile_inputs[0]),
                                    NULL) == VPS_ARGUMENTS_OK,
                "profile_mode");
+    TEST_CHECK(vps_arguments_get(
+                   &arguments, VPS_ARGUMENT_ID_QUERY_MATERIALIZATION)
+                       ->enum_value == VPS_ARGUMENT_ENUM_MATERIALIZATION_MEMORY,
+               "materialization_mode");
     TEST_CHECK(vps_arguments_parse(&arguments, connstr_inputs,
                                    sizeof(connstr_inputs) /
                                        sizeof(connstr_inputs[0]),

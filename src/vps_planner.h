@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VPS_PLAN_FORMAT_VERSION UINT32_C(1)
+#define VPS_PLAN_FORMAT_VERSION UINT32_C(2)
 #define VPS_PLAN_MAX_COLUMNS 1024U
 #define VPS_PLAN_MAX_CONSTRAINTS 64U
 #define VPS_PLAN_MAX_ORDER_TERMS 32U
@@ -98,6 +98,7 @@ typedef struct VpsPlannerRequest {
     uint64_t estimated_base_rows;
     uint64_t relation_pages;
     size_t query_index_prefix;
+    size_t query_index_ordinal;
     VpsLogger *logger;
 } VpsPlannerRequest;
 
@@ -131,6 +132,7 @@ typedef struct VpsCompiledPlan {
     uint16_t order_count;
     uint16_t argument_count;
     uint16_t selected_index_prefix;
+    uint16_t selected_index_ordinal;
 } VpsCompiledPlan;
 
 VpsPlannerResult vps_planner_compile(const VpsPlannerRequest *request,

@@ -3,7 +3,7 @@
 #include <string.h>
 
 #define VPS_PLAN_WIRE_MAGIC UINT32_C(0x31535056)
-#define VPS_PLAN_WIRE_HEADER_BYTES 46U
+#define VPS_PLAN_WIRE_HEADER_BYTES 48U
 #define VPS_PLAN_WIRE_CONSTRAINT_BYTES 16U
 #define VPS_PLAN_WIRE_ORDER_BYTES 4U
 
@@ -252,6 +252,8 @@ VpsPlannerResult vps_planner_compile(const VpsPlannerRequest *request,
     }
     plan->selected_index_prefix =
         (uint16_t)vps_plan_min_u64(request->query_index_prefix, UINT16_MAX);
+    plan->selected_index_ordinal =
+        (uint16_t)vps_plan_min_u64(request->query_index_ordinal, UINT16_MAX);
     plan->estimated_cost_milli =
         plan->estimated_rows * UINT64_C(1000) +
         request->relation_pages * UINT64_C(10);
@@ -308,6 +310,7 @@ VpsPlannerResult vps_plan_encode(const VpsCompiledPlan *plan,
     vps_plan_put_u16(wire + 40U, plan->order_count);
     vps_plan_put_u16(wire + 42U, plan->argument_count);
     vps_plan_put_u16(wire + 44U, plan->selected_index_prefix);
+    vps_plan_put_u16(wire + 46U, plan->selected_index_ordinal);
     offset = VPS_PLAN_WIRE_HEADER_BYTES;
     for (index = 0U; index < plan->projection_count; ++index, offset += 2U)
         vps_plan_put_u16(wire + offset, plan->projection[index]);
@@ -391,6 +394,7 @@ VpsPlannerResult vps_plan_decode(const char *encoded,
     plan->order_count = vps_plan_get_u16(wire + 40U);
     plan->argument_count = vps_plan_get_u16(wire + 42U);
     plan->selected_index_prefix = vps_plan_get_u16(wire + 44U);
+    plan->selected_index_ordinal = vps_plan_get_u16(wire + 46U);
     if (plan->projection_count > VPS_PLAN_MAX_COLUMNS ||
         plan->constraint_count > VPS_PLAN_MAX_CONSTRAINTS ||
         plan->order_count > VPS_PLAN_MAX_ORDER_TERMS ||

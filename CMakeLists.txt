@@ -33,6 +33,8 @@ set(VPS_SQLITE_AMALGAMATION_DIR
 option(VPS_BUILD_EXTENSION "Build the loadable extension and SQLite host tests" ON)
 option(VPS_ENABLE_ASAN "Enable AddressSanitizer for supported Windows targets" OFF)
 option(VPS_ENABLE_WINCRED "Build the Windows Credential Manager adapter" ON)
+option(VPS_ENABLE_QUERY_MATERIALIZATION
+  "Build the symbol-isolated private SQLite query snapshot adapter" ON)
 option(VPS_BUILD_FUZZ "Build clang libFuzzer targets" OFF)
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -40,6 +42,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 else()
   set(VPS_DEPENDENCY_ARCH "x86")
 endif()
+
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(VPS_DEPENDENCY_CONFIG "Debug")
 else()
@@ -211,6 +214,49 @@ target_include_directories(vps_logging PUBLIC
 vps_apply_strict_warnings(vps_logging)
 vps_apply_asan(vps_logging)
 
+if(VPS_ENABLE_QUERY_MATERIALIZATION)
+  if(NOT EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3.c")
+    message(FATAL_ERROR
+      "[embedded-sqlite] pinned amalgamation is required for materialization")
+  endif()
+  # The wrapper includes the amalgamation with SQLITE_API internal linkage.
+  add_library(vps_embedded_sqlite STATIC src/vps_embedded_sqlite.c)
+  target_compile_features(vps_embedded_sqlite PRIVATE c_std_11)
+  set_target_properties(vps_embedded_sqlite PROPERTIES
+    C_EXTENSIONS OFF
+    C_VISIBILITY_PRESET hidden
+    POSITION_INDEPENDENT_CODE ON
+  )
+  target_compile_definitions(vps_embedded_sqlite PRIVATE
+    SQLITE_THREADSAFE=1
+    SQLITE_DQS=0
+    SQLITE_DEFAULT_MEMSTATUS=0
+    SQLITE_OMIT_DEPRECATED
+    SQLITE_OMIT_LOAD_EXTENSION
+    SQLITE_OMIT_SHARED_CACHE
+    SQLITE_ENABLE_API_ARMOR
+    SQLITE_ENABLE_RTREE
+    SQLITE_TEMP_STORE=1
+  )
+  target_include_directories(vps_embedded_sqlite
+    PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+    PRIVATE "${VPS_SQLITE_AMALGAMATION_DIR}"
+  )
+  target_link_libraries(vps_embedded_sqlite PUBLIC vps_logging vps_memory)
+  if(WIN32)
+    target_link_libraries(vps_embedded_sqlite PRIVATE advapi32)
+    target_compile_options(vps_embedded_sqlite PRIVATE /w)
+  else()
+    target_link_libraries(vps_embedded_sqlite PRIVATE ${CMAKE_DL_LIBS})
+    target_compile_options(vps_embedded_sqlite PRIVATE -w)
+  endif()
+  vps_apply_asan(vps_embedded_sqlite)
+  message(STATUS
+    "[embedded-sqlite] symbol-isolated pinned target enabled")
+else()
+  message(STATUS "[embedded-sqlite] query materialization disabled")
+endif()
+
 add_library(vps_deadline STATIC
   src/vps_deadline.c
 )
@@ -233,6 +279,7 @@ add_library(vps_platform STATIC
 )
 if(WIN32)
   target_sources(vps_platform PRIVATE src/vps_windows.c)
+  target_sources(vps_platform PRIVATE src/vps_windows_temp.c)
 endif()
 target_compile_features(vps_platform PUBLIC c_std_11)
 set_target_properties(vps_platform PROPERTIES
@@ -243,9 +290,25 @@ target_include_directories(vps_platform PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
 )
 if(WIN32)
-  target_link_libraries(vps_platform PRIVATE bcrypt ws2_32)
+  target_link_libraries(vps_platform PRIVATE advapi32 bcrypt ole32 shell32 ws2_32)
 endif()
 vps_apply_strict_warnings(vps_platform)
+
+if(TARGET vps_embedded_sqlite)
+  add_library(vps_query_cache STATIC src/vps_query_cache.c)
+  target_compile_features(vps_query_cache PRIVATE c_std_11)
+  set_target_properties(vps_query_cache PROPERTIES
+    C_EXTENSIONS OFF
+    POSITION_INDEPENDENT_CODE ON
+  )
+  target_include_directories(vps_query_cache PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+  )
+  target_link_libraries(vps_query_cache PUBLIC
+    vps_embedded_sqlite vps_platform vps_logging vps_memory)
+  vps_apply_strict_warnings(vps_query_cache)
+  vps_apply_asan(vps_query_cache)
+endif()
 
 add_library(vps_secure_memory STATIC
   src/vps_secure_memory.c
@@ -853,6 +916,10 @@ if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
     OUTPUT_NAME "virtualpostgresql"
   )
   target_compile_definitions(virtualpostgresql PRIVATE VPS_BUILD_DLL)
+  if(TARGET vps_query_cache)
+    target_compile_definitions(virtualpostgresql PRIVATE
+      VPS_ENABLE_QUERY_MATERIALIZATION=1)
+  endif()
   target_include_directories(virtualpostgresql PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -869,10 +936,15 @@ if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
     vps_libpq_client
     vps_libpq_client_conninfo
     vps_planner
+    vps_query_metadata
     vps_query_validation
     vps_row_identity
     vps_type_codec
   )
+  if(TARGET vps_query_cache)
+    target_link_libraries(virtualpostgresql PRIVATE
+      vps_query_cache vps_embedded_sqlite)
+  endif()
   if(WIN32 AND VPS_ENABLE_WINCRED)
     target_link_libraries(virtualpostgresql PRIVATE vps_wincred_provider)
   endif()
@@ -891,6 +963,47 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  if(TARGET vps_embedded_sqlite)
+    add_executable(vps_embedded_sqlite_test
+      tests/unit/vps_embedded_sqlite_test.c)
+    target_compile_features(vps_embedded_sqlite_test PRIVATE c_std_11)
+    set_target_properties(vps_embedded_sqlite_test PROPERTIES C_EXTENSIONS OFF)
+    target_link_libraries(vps_embedded_sqlite_test PRIVATE vps_embedded_sqlite)
+    vps_apply_strict_warnings(vps_embedded_sqlite_test)
+    vps_apply_asan(vps_embedded_sqlite_test)
+    add_test(NAME vps_embedded_sqlite COMMAND vps_embedded_sqlite_test)
+    add_executable(vps_query_cache_test tests/unit/vps_query_cache_test.c)
+    target_compile_features(vps_query_cache_test PRIVATE c_std_11)
+    set_target_properties(vps_query_cache_test PROPERTIES C_EXTENSIONS OFF)
+    target_link_libraries(vps_query_cache_test PRIVATE vps_query_cache)
+    vps_apply_strict_warnings(vps_query_cache_test)
+    vps_apply_asan(vps_query_cache_test)
+    add_test(NAME vps_query_cache COMMAND vps_query_cache_test)
+    if(WIN32)
+      add_executable(vps_temp_file_test tests/unit/vps_temp_file_test.c)
+      target_compile_features(vps_temp_file_test PRIVATE c_std_11)
+      set_target_properties(vps_temp_file_test PROPERTIES C_EXTENSIONS OFF)
+      target_link_libraries(vps_temp_file_test PRIVATE
+        vps_embedded_sqlite vps_platform)
+      vps_apply_strict_warnings(vps_temp_file_test)
+      vps_apply_asan(vps_temp_file_test)
+      add_test(NAME vps_temp_file COMMAND vps_temp_file_test)
+    endif()
+    add_executable(vps_materialization_performance_test
+      tests/performance/vps_materialization_performance_test.c)
+    target_compile_features(vps_materialization_performance_test PRIVATE c_std_11)
+    set_target_properties(vps_materialization_performance_test PROPERTIES
+      C_EXTENSIONS OFF)
+    target_link_libraries(vps_materialization_performance_test PRIVATE
+      vps_embedded_sqlite vps_platform)
+    if(WIN32)
+      target_link_libraries(vps_materialization_performance_test PRIVATE psapi)
+    endif()
+    vps_apply_strict_warnings(vps_materialization_performance_test)
+    vps_apply_asan(vps_materialization_performance_test)
+    add_test(NAME vps_materialization_performance
+      COMMAND vps_materialization_performance_test)
+  endif()
   add_executable(vps_abi_layout_test
     tests/unit/vps_abi_layout_test.c
   )
@@ -1356,10 +1469,17 @@ if(BUILD_TESTING)
       vps_libpq_client
       vps_libpq_client_conninfo
       vps_planner
+      vps_query_metadata
       vps_query_validation
       vps_row_identity
       vps_type_codec
     )
+    if(TARGET vps_query_cache)
+      target_compile_definitions(vps_extension_version_test PRIVATE
+        VPS_ENABLE_QUERY_MATERIALIZATION=1)
+      target_link_libraries(vps_extension_version_test PRIVATE
+        vps_query_cache vps_embedded_sqlite)
+    endif()
     if(WIN32 AND VPS_ENABLE_WINCRED)
       target_link_libraries(vps_extension_version_test PRIVATE
         vps_wincred_provider)

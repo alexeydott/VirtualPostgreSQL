@@ -39,7 +39,9 @@ static const VpsArgumentDefinition vps_argument_definitions[] = {
     {"pool_validation_interval", VPS_ARGUMENT_TYPE_UINT32, 10U, 0},
     {"pool_reset", VPS_ARGUMENT_TYPE_ENUM, 16U, 0},
     {"pool_readonly_separate", VPS_ARGUMENT_TYPE_BOOLEAN, 5U, 0},
-    {"metadata_mode", VPS_ARGUMENT_TYPE_ENUM, 8U, 0}};
+    {"metadata_mode", VPS_ARGUMENT_TYPE_ENUM, 8U, 0},
+    {"query_indexes", VPS_ARGUMENT_TYPE_STRING, 8192U, 0},
+    {"query_materialization", VPS_ARGUMENT_TYPE_ENUM, 6U, 0}};
 
 _Static_assert(sizeof(vps_argument_definitions) /
                        sizeof(vps_argument_definitions[0]) ==
@@ -287,6 +289,19 @@ static int vps_argument_parse_enum(VpsArgumentId argument_id,
         }
         if (length == 6U && memcmp(value, "cached", 6U) == 0) {
             *parsed = VPS_ARGUMENT_ENUM_METADATA_CACHED;
+            return 1;
+        }
+    } else if (argument_id == VPS_ARGUMENT_ID_QUERY_MATERIALIZATION) {
+        if (length == 3U && memcmp(value, "off", 3U) == 0) {
+            *parsed = VPS_ARGUMENT_ENUM_MATERIALIZATION_OFF;
+            return 1;
+        }
+        if (length == 6U && memcmp(value, "memory", 6U) == 0) {
+            *parsed = VPS_ARGUMENT_ENUM_MATERIALIZATION_MEMORY;
+            return 1;
+        }
+        if (length == 4U && memcmp(value, "temp", 4U) == 0) {
+            *parsed = VPS_ARGUMENT_ENUM_MATERIALIZATION_TEMP;
             return 1;
         }
     }
@@ -542,6 +557,15 @@ static VpsArgumentsResult vps_arguments_validate_combinations(
         vps_arguments_set_diagnostic(diagnostic,
                                      VPS_ARGUMENTS_INCOMPATIBLE,
                                      VPS_ARGUMENT_ID_POOL_MIN,
+                                     arguments->presence);
+        return VPS_ARGUMENTS_INCOMPATIBLE;
+    }
+    if (arguments->values[VPS_ARGUMENT_ID_SOURCE].enum_value !=
+            VPS_ARGUMENT_ENUM_SOURCE_QUERY &&
+        (arguments->presence & (VPS_ARGUMENT_QUERY_INDEXES |
+                                VPS_ARGUMENT_QUERY_MATERIALIZATION)) != 0U) {
+        vps_arguments_set_diagnostic(diagnostic, VPS_ARGUMENTS_INCOMPATIBLE,
+                                     VPS_ARGUMENT_ID_QUERY_MATERIALIZATION,
                                      arguments->presence);
         return VPS_ARGUMENTS_INCOMPATIBLE;
     }

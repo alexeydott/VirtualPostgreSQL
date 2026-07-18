@@ -27,3 +27,13 @@ Raw query, profile content и values не входят в обычные logs/er
 `key_columns` объявляет validated logical identity только для read-only planning; query source не получает DML. `query_indexes` использует grammar `name=column[,column...][;...]`, сохраняет порядок columns и не заявляет remote/unique index. Unique planning может опираться только на validated `key_columns`.
 
 Query fingerprint включает normalized query hash/profile version, ordered aliases and OID/typmod/origin/collation metadata, spatial policy, keys, query indexes, materialization mode и wrapper/codec versions. Изменение любого contract-relevant component считается metadata drift.
+
+## Query materialization
+
+`query_materialization=off|memory|temp` управляет lazy snapshot только для `source=query`; default `off` сохраняет single-row remote streaming. `memory` строит immutable private in-memory SQLite database, `temp` — private database в `%LOCALAPPDATA%\VirtualPostgreSQL\Temp` с owner-only ACL, in-memory rollback journal и delete-on-close cleanup. Host SQLite handles и allocators не передаются private SQLite.
+
+Первый scan полностью выполняет validated source query один раз, переносит уже декодированные portable SQLite values и строит non-unique physical indexes из `query_indexes`. Candidate становится видимым только после terminal remote result, всех limit checks, local index build и private commit. Failed/late-error/OOM/temp/index build очищается без partial publish; следующий caller может безопасно повторить build. Published generation immutable, не имеет TTL, automatic refresh или host-shadow rows.
+
+Subsequent cursors получают refcounted lease и выполняют exact predicates, projection, compatible ordering и consumed limit/offset локально. `query_indexes` никогда не создаёт unique claim: `SQLITE_INDEX_SCAN_UNIQUE` по-прежнему допускается только для полностью constrained validated `key_columns`. Для обновления snapshot virtual table нужно disconnect/reconnect или recreate; скрытого refresh нет.
+
+Stage gate измеряет минимум 3 samples по 100 probes: remote executions должны сокращаться с `N` до `1`, physical local index подтверждается private `EXPLAIN QUERY PLAN`, а p50 должен улучшаться минимум на 10%. Bulk/equivalence/performance contour выполняется на локальном no-SSL стенде; quota-limited TLS stand не используется для bulk data.
