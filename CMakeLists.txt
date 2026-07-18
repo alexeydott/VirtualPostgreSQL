@@ -824,6 +824,21 @@ target_link_libraries(vps_dml PUBLIC
 vps_apply_strict_warnings(vps_dml)
 vps_apply_asan(vps_dml)
 
+add_library(vps_transaction STATIC
+  src/vps_transaction.c
+)
+target_compile_features(vps_transaction PUBLIC c_std_11)
+set_target_properties(vps_transaction PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_transaction PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_transaction PUBLIC vps_identity vps_logging)
+vps_apply_strict_warnings(vps_transaction)
+vps_apply_asan(vps_transaction)
+
 if(EXISTS "${VPS_LIBPQ_INCLUDE_DIR}/libpq-fe.h" AND
    EXISTS "${VPS_LIBPQ_LIBRARY_DIR}/libpq.lib")
   add_library(vps_libpq_client_conninfo STATIC
@@ -968,6 +983,7 @@ if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
     vps_libpq_client
     vps_libpq_client_conninfo
     vps_dml
+    vps_transaction
     vps_planner
     vps_query_metadata
     vps_query_validation
@@ -1073,6 +1089,14 @@ if(BUILD_TESTING)
   vps_apply_strict_warnings(vps_dml_test)
   vps_apply_asan(vps_dml_test)
   add_test(NAME vps_dml COMMAND vps_dml_test)
+
+  add_executable(vps_transaction_test tests/unit/vps_transaction_test.c)
+  target_compile_features(vps_transaction_test PRIVATE c_std_11)
+  set_target_properties(vps_transaction_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_transaction_test PRIVATE vps_transaction)
+  vps_apply_strict_warnings(vps_transaction_test)
+  vps_apply_asan(vps_transaction_test)
+  add_test(NAME vps_transaction COMMAND vps_transaction_test)
 
   add_executable(vps_platform_contract_test
     tests/unit/vps_platform_contract_test.c
@@ -1508,6 +1532,7 @@ if(BUILD_TESTING)
       vps_cancel
       vps_cursor
       vps_dml
+      vps_transaction
       vps_identity
       vps_libpq_client
       vps_libpq_client_conninfo

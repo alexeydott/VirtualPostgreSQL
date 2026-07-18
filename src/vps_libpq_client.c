@@ -106,10 +106,11 @@ static VpsLibpqTransactionStatus vps_libpq_default_transaction_status(
     status = PQtransactionStatus((const PGconn *)connection);
     return status == PQTRANS_IDLE
                ? VPS_LIBPQ_TRANSACTION_IDLE
-               : status == PQTRANS_ACTIVE || status == PQTRANS_INTRANS ||
-                         status == PQTRANS_INERROR
-                     ? VPS_LIBPQ_TRANSACTION_ACTIVE
-                     : VPS_LIBPQ_TRANSACTION_UNKNOWN;
+               : status == PQTRANS_INERROR
+                     ? VPS_LIBPQ_TRANSACTION_INERROR
+                     : status == PQTRANS_ACTIVE || status == PQTRANS_INTRANS
+                           ? VPS_LIBPQ_TRANSACTION_ACTIVE
+                           : VPS_LIBPQ_TRANSACTION_UNKNOWN;
 }
 
 static VpsLibpqPipelineStatus vps_libpq_default_pipeline_status(
@@ -816,7 +817,10 @@ static VpsClientStatus vps_libpq_connection_start(
         return VPS_CLIENT_INVALID_STATE;
     }
     if ((operation == VPS_CLIENT_OPERATION_RESET ||
-         operation == VPS_CLIENT_OPERATION_PING) &&
+         operation == VPS_CLIENT_OPERATION_PING ||
+         operation == VPS_CLIENT_OPERATION_BEGIN ||
+         operation == VPS_CLIENT_OPERATION_COMMIT ||
+         operation == VPS_CLIENT_OPERATION_ROLLBACK) &&
         connection->phase == VPS_LIBPQ_PHASE_READY) {
         if (vps_deadline_start(client->platform_operations,
                                client->connect_timeout_ms,
@@ -1023,7 +1027,14 @@ static VpsClientStatus vps_libpq_connection_wait(
                        : connection->active_operation ==
                                  VPS_CLIENT_OPERATION_PING
                              ? VPS_CLIENT_WAIT_PING
-                             : VPS_CLIENT_WAIT_CONNECT) ||
+                             : connection->active_operation ==
+                                       VPS_CLIENT_OPERATION_BEGIN ||
+                                   connection->active_operation ==
+                                       VPS_CLIENT_OPERATION_COMMIT ||
+                                   connection->active_operation ==
+                                       VPS_CLIENT_OPERATION_ROLLBACK
+                                 ? VPS_CLIENT_WAIT_TRANSACTION
+                                 : VPS_CLIENT_WAIT_CONNECT) ||
         wait_request->interest != connection->wait_interest) {
         return VPS_CLIENT_INVALID_STATE;
     }
@@ -1041,7 +1052,14 @@ static VpsClientStatus vps_libpq_connection_wait(
                         : connection->active_operation ==
                                   VPS_CLIENT_OPERATION_PING
                               ? VPS_WAIT_PHASE_PING
-                              : VPS_WAIT_PHASE_CONNECT;
+                              : connection->active_operation ==
+                                        VPS_CLIENT_OPERATION_BEGIN ||
+                                    connection->active_operation ==
+                                        VPS_CLIENT_OPERATION_COMMIT ||
+                                    connection->active_operation ==
+                                        VPS_CLIENT_OPERATION_ROLLBACK
+                                  ? VPS_WAIT_PHASE_STATEMENT
+                                  : VPS_WAIT_PHASE_CONNECT;
     deadline_status = vps_socket_wait_execute(&request, &wait_result);
     connection->wait_count += wait_result.wait_count;
     if (deadline_status == VPS_DEADLINE_OK &&
@@ -1100,6 +1118,7 @@ VpsClientStatus vps_libpq_client_make_operations(
                                VPS_CLIENT_CAP_PREPARE |
                                VPS_CLIENT_CAP_EXECUTE |
                                VPS_CLIENT_CAP_FETCH |
+                               VPS_CLIENT_CAP_TRANSACTION |
                                VPS_CLIENT_CAP_RESET |
                                VPS_CLIENT_CAP_PING |
                                VPS_CLIENT_CAP_CANCEL;

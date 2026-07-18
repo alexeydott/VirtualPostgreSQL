@@ -6,6 +6,9 @@ static const char vps_health_set_config_query[] =
     "SELECT pg_catalog.set_config($1, $2, false)";
 static const char vps_health_ping_query[] = "SELECT 1";
 static const char vps_health_discard_query[] = "DISCARD ALL";
+static const char vps_health_begin_query[] = "BEGIN";
+static const char vps_health_commit_query[] = "COMMIT";
+static const char vps_health_rollback_query[] = "ROLLBACK";
 
 static VpsClientStatus vps_health_fail(VpsLibpqConnection *connection,
                                        VpsError *error,
@@ -16,16 +19,17 @@ static VpsClientStatus vps_health_fail(VpsLibpqConnection *connection,
     return vps_libpq_set_error(error, error_class);
 }
 
-static int vps_health_preflight(VpsLibpqConnection *connection)
+static int vps_health_preflight(VpsLibpqConnection *connection,
+                                VpsClientOperation operation)
 {
     VpsLibpqClient *client = connection->client;
+    VpsLibpqTransactionStatus transaction_status;
     void *pending;
+    transaction_status = client->api.transaction_status(
+        client->api.context, connection->postgresql_connection);
     if (client->api.connection_status(client->api.context,
                                       connection->postgresql_connection) !=
             VPS_LIBPQ_CONNECTION_OK ||
-        client->api.transaction_status(client->api.context,
-                                       connection->postgresql_connection) !=
-            VPS_LIBPQ_TRANSACTION_IDLE ||
         client->api.pipeline_status(client->api.context,
                                     connection->postgresql_connection) !=
             VPS_LIBPQ_PIPELINE_OFF ||
@@ -34,6 +38,16 @@ static int vps_health_preflight(VpsLibpqConnection *connection)
                             connection->postgresql_connection)) {
         return 0;
     }
+    if ((operation == VPS_CLIENT_OPERATION_BEGIN ||
+         operation == VPS_CLIENT_OPERATION_RESET ||
+         operation == VPS_CLIENT_OPERATION_PING) &&
+        transaction_status != VPS_LIBPQ_TRANSACTION_IDLE)
+        return 0;
+    if ((operation == VPS_CLIENT_OPERATION_COMMIT ||
+         operation == VPS_CLIENT_OPERATION_ROLLBACK) &&
+        transaction_status != VPS_LIBPQ_TRANSACTION_ACTIVE &&
+        transaction_status != VPS_LIBPQ_TRANSACTION_INERROR)
+        return 0;
     pending = client->api.get_result(client->api.context,
                                      connection->postgresql_connection);
     if (pending != NULL) {
@@ -51,11 +65,14 @@ VpsClientStatus vps_libpq_health_begin(VpsLibpqConnection *connection,
     if (connection == NULL || connection->client == NULL ||
         (operation != VPS_CLIENT_OPERATION_CONNECT &&
          operation != VPS_CLIENT_OPERATION_RESET &&
-         operation != VPS_CLIENT_OPERATION_PING)) {
+         operation != VPS_CLIENT_OPERATION_PING &&
+         operation != VPS_CLIENT_OPERATION_BEGIN &&
+         operation != VPS_CLIENT_OPERATION_COMMIT &&
+         operation != VPS_CLIENT_OPERATION_ROLLBACK)) {
         return VPS_CLIENT_INVALID_ARGUMENT;
     }
     if (operation != VPS_CLIENT_OPERATION_CONNECT &&
-        !vps_health_preflight(connection)) {
+        !vps_health_preflight(connection, operation)) {
         return vps_health_fail(connection, error,
                                VPS_ERROR_CLASS_CONNECTION);
     }
@@ -78,7 +95,13 @@ static VpsClientStatus vps_health_send(VpsLibpqConnection *connection,
     int parameter_count = 0;
     int sent;
 
-    if (connection->active_operation == VPS_CLIENT_OPERATION_RESET &&
+    if (connection->active_operation == VPS_CLIENT_OPERATION_BEGIN) {
+        query = vps_health_begin_query;
+    } else if (connection->active_operation == VPS_CLIENT_OPERATION_COMMIT) {
+        query = vps_health_commit_query;
+    } else if (connection->active_operation == VPS_CLIENT_OPERATION_ROLLBACK) {
+        query = vps_health_rollback_query;
+    } else if (connection->active_operation == VPS_CLIENT_OPERATION_RESET &&
         client->reset_mode == VPS_LIBPQ_RESET_DISCARD_ALL &&
         !connection->reset_discard_complete) {
         query = vps_health_discard_query;
@@ -131,6 +154,10 @@ static int vps_health_result_valid(VpsLibpqConnection *connection,
     VpsLibpqClient *client = connection->client;
     VpsLibpqResultStatus status = client->api.result_status(
         client->api.context, result);
+    if (connection->active_operation == VPS_CLIENT_OPERATION_BEGIN ||
+        connection->active_operation == VPS_CLIENT_OPERATION_COMMIT ||
+        connection->active_operation == VPS_CLIENT_OPERATION_ROLLBACK)
+        return status == VPS_LIBPQ_RESULT_COMMAND_OK;
     if (connection->active_operation == VPS_CLIENT_OPERATION_RESET &&
         client->reset_mode == VPS_LIBPQ_RESET_DISCARD_ALL &&
         !connection->reset_discard_complete) {
@@ -161,6 +188,14 @@ static int vps_health_result_valid(VpsLibpqConnection *connection,
 static void vps_health_command_complete(VpsLibpqConnection *connection)
 {
     VpsLibpqClient *client = connection->client;
+    if (connection->active_operation == VPS_CLIENT_OPERATION_BEGIN ||
+        connection->active_operation == VPS_CLIENT_OPERATION_COMMIT ||
+        connection->active_operation == VPS_CLIENT_OPERATION_ROLLBACK) {
+        connection->phase = VPS_LIBPQ_PHASE_READY;
+        connection->health_phase = VPS_LIBPQ_HEALTH_IDLE;
+        connection->active_operation = VPS_CLIENT_OPERATION_NONE;
+        return;
+    }
     if (connection->active_operation == VPS_CLIENT_OPERATION_PING) {
         connection->phase = VPS_LIBPQ_PHASE_READY;
         connection->health_phase = VPS_LIBPQ_HEALTH_IDLE;
@@ -244,8 +279,14 @@ VpsClientStatus vps_libpq_health_poll(VpsLibpqConnection *connection,
                 const char *sqlstate = client->api.result_sqlstate(
                     client->api.context, postgresql_result);
                 if (sqlstate != NULL) {
+                    VpsErrorOperation error_operation =
+                        connection->active_operation == VPS_CLIENT_OPERATION_COMMIT
+                            ? VPS_ERROR_OPERATION_COMMIT
+                            : connection->active_operation == VPS_CLIENT_OPERATION_ROLLBACK
+                                  ? VPS_ERROR_OPERATION_ROLLBACK
+                                  : VPS_ERROR_OPERATION_CONNECT;
                     (void)vps_error_set_sqlstate(error,
-                                                 VPS_ERROR_OPERATION_CONNECT,
+                                                 error_operation,
                                                  sqlstate, 0, 0, NULL);
                 }
                 client->api.clear_result(client->api.context,
@@ -276,7 +317,14 @@ VpsClientStatus vps_libpq_health_poll(VpsLibpqConnection *connection,
                              : connection->active_operation ==
                                        VPS_CLIENT_OPERATION_PING
                                    ? VPS_CLIENT_WAIT_PING
-                                   : VPS_CLIENT_WAIT_CONNECT;
+                                   : connection->active_operation ==
+                                             VPS_CLIENT_OPERATION_BEGIN ||
+                                         connection->active_operation ==
+                                             VPS_CLIENT_OPERATION_COMMIT ||
+                                         connection->active_operation ==
+                                             VPS_CLIENT_OPERATION_ROLLBACK
+                                       ? VPS_CLIENT_WAIT_TRANSACTION
+                                       : VPS_CLIENT_WAIT_CONNECT;
     result->wait.max_slice_ms = client->wait_slice_ms;
     return VPS_CLIENT_OK;
 }

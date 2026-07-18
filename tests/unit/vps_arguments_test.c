@@ -118,7 +118,9 @@ static int test_valid_table_and_types(void)
         INPUT_LITERAL("pool_validation_interval=30"),
         INPUT_LITERAL("pool_reset=strict_reset"),
         INPUT_LITERAL("pool_readonly_separate=false"),
-        INPUT_LITERAL("metadata_mode=cached")};
+        INPUT_LITERAL("metadata_mode=cached"),
+        INPUT_LITERAL("isolation=serializable"),
+        INPUT_LITERAL("transaction_read_only=true")};
     TestPlatformState platform_state;
     VpsPlatformOperations operations = test_operations();
     VpsAllocator allocator;
@@ -152,6 +154,15 @@ static int test_valid_table_and_types(void)
     TEST_CHECK(value != NULL &&
                    value->enum_value == VPS_ARGUMENT_ENUM_GEOMETRY_EWKB,
                "enum_value");
+    value = vps_arguments_get(&arguments, VPS_ARGUMENT_ID_ISOLATION);
+    TEST_CHECK(value != NULL &&
+                   value->enum_value ==
+                       VPS_ARGUMENT_ENUM_ISOLATION_SERIALIZABLE,
+               "transaction_isolation");
+    value = vps_arguments_get(&arguments,
+                              VPS_ARGUMENT_ID_TRANSACTION_READ_ONLY);
+    TEST_CHECK(value != NULL && value->boolean_value,
+               "transaction_read_only");
     TEST_CHECK(vps_arguments_reset(&arguments) == VPS_ARGUMENTS_OK &&
                    vps_arguments_reset(&arguments) == VPS_ARGUMENTS_OK &&
                    platform_state.zero_calls == 1U,

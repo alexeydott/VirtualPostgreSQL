@@ -3,15 +3,23 @@
 
 #include "sqlite3ext.h"
 #include "vps_cancel.h"
+#include "vps_client.h"
+#include "vps_connection_pool.h"
+#include "vps_transaction.h"
 
 #include <stdint.h>
 
 typedef struct VpsModuleContext {
     sqlite3 *database;
     VpsCancelRegistry cancel_registry;
+    VpsAllocator transaction_allocator;
+    VpsTransactionCoordinator transaction;
+    VpsConnectionLease transaction_lease;
+    VpsClientConnection *transaction_connection;
     uint64_t next_table_id;
     uint64_t table_references;
     int initialized_cancel_registry;
+    int initialized_transaction;
     int closing;
 } VpsModuleContext;
 

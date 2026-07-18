@@ -22,7 +22,9 @@ typedef enum VpsIdentityField {
     VPS_IDENTITY_FIELD_READ_WRITE_CLASS = 16,
     VPS_IDENTITY_FIELD_CONNECT_TIMEOUT = 17,
     VPS_IDENTITY_FIELD_STATEMENT_TIMEOUT = 18,
-    VPS_IDENTITY_FIELD_LOCK_TIMEOUT = 19
+    VPS_IDENTITY_FIELD_LOCK_TIMEOUT = 19,
+    VPS_IDENTITY_FIELD_ISOLATION = 20,
+    VPS_IDENTITY_FIELD_TRANSACTION_READ_ONLY = 21
 } VpsIdentityField;
 
 static const unsigned char vps_identity_header[] = {'V', 'P', 'S', 'I', 1U};
@@ -589,6 +591,31 @@ VpsIdentityResult vps_identity_build(
         VPS_IDENTITY_FIELD_STATEMENT_TIMEOUT, statement_timeout, strlen(statement_timeout)));
     VPS_IDENTITY_TRY(vps_identity_append(&replacement.canonical,
         VPS_IDENTITY_FIELD_LOCK_TIMEOUT, lock_timeout, strlen(lock_timeout)));
+    {
+        const VpsArgumentValue *isolation = vps_arguments_get(
+            arguments, VPS_ARGUMENT_ID_ISOLATION);
+        const VpsArgumentValue *read_only = vps_arguments_get(
+            arguments, VPS_ARGUMENT_ID_TRANSACTION_READ_ONLY);
+        const char *isolation_text = "read_committed";
+        const char *read_only_text = "false";
+        if (isolation != NULL && isolation->present) {
+            isolation_text = isolation->enum_value ==
+                                     VPS_ARGUMENT_ENUM_ISOLATION_REPEATABLE_READ
+                                 ? "repeatable_read"
+                                 : isolation->enum_value ==
+                                           VPS_ARGUMENT_ENUM_ISOLATION_SERIALIZABLE
+                                       ? "serializable"
+                                       : "read_committed";
+        }
+        if (read_only != NULL && read_only->present && read_only->boolean_value)
+            read_only_text = "true";
+        VPS_IDENTITY_TRY(vps_identity_append(&replacement.canonical,
+            VPS_IDENTITY_FIELD_ISOLATION, isolation_text,
+            strlen(isolation_text)));
+        VPS_IDENTITY_TRY(vps_identity_append(&replacement.canonical,
+            VPS_IDENTITY_FIELD_TRANSACTION_READ_ONLY, read_only_text,
+            strlen(read_only_text)));
+    }
     replacement.credential_generation = options->credential_generation != 0U
         ? options->credential_generation : connection->generation;
     replacement.configuration_generation = options->configuration_generation;

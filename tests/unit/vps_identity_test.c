@@ -351,6 +351,63 @@ static int test_mode_backend_and_bounds(void)
     return 1;
 }
 
+static int test_transaction_policy_identity(void)
+{
+    static const VpsArgumentInput base_inputs[] = {
+        INPUT_LITERAL("credential_ref=identity/ref"),
+        INPUT_LITERAL("source=table"), INPUT_LITERAL("schema=public"),
+        INPUT_LITERAL("table=items"),
+        INPUT_LITERAL("isolation=read_committed"),
+        INPUT_LITERAL("transaction_read_only=false")};
+    static const VpsArgumentInput changed_inputs[] = {
+        INPUT_LITERAL("credential_ref=identity/ref"),
+        INPUT_LITERAL("source=table"), INPUT_LITERAL("schema=public"),
+        INPUT_LITERAL("table=items"),
+        INPUT_LITERAL("isolation=serializable"),
+        INPUT_LITERAL("transaction_read_only=true")};
+    VpsAllocator allocator;
+    VpsParsedArguments base_arguments;
+    VpsParsedArguments changed_arguments;
+    VpsConnectionConfig config;
+    VpsConnectionIdentity base;
+    VpsConnectionIdentity changed;
+    VpsIdentityBuildOptions options = {NULL, 0U, 1U, 1U};
+    TEST_CHECK(vps_allocator_system(&allocator) == VPS_MEMORY_OK &&
+                   vps_arguments_init(&base_arguments, &allocator,
+                                      vps_platform_current_operations(), NULL) ==
+                       VPS_ARGUMENTS_OK &&
+                   vps_arguments_init(&changed_arguments, &allocator,
+                                      vps_platform_current_operations(), NULL) ==
+                       VPS_ARGUMENTS_OK &&
+                   vps_arguments_parse(&base_arguments, base_inputs,
+                                       sizeof(base_inputs) /
+                                           sizeof(base_inputs[0]),
+                                       NULL) == VPS_ARGUMENTS_OK &&
+                   vps_arguments_parse(&changed_arguments, changed_inputs,
+                                       sizeof(changed_inputs) /
+                                           sizeof(changed_inputs[0]),
+                                       NULL) == VPS_ARGUMENTS_OK &&
+                   vps_identity_init(&base, &allocator, NULL) ==
+                       VPS_IDENTITY_OK &&
+                   vps_identity_init(&changed, &allocator, NULL) ==
+                       VPS_IDENTITY_OK,
+               "transaction_policy_init");
+    test_config_init(&config);
+    TEST_CHECK(vps_identity_build(&base, &config, &base_arguments, &options) ==
+                       VPS_IDENTITY_OK &&
+                   vps_identity_build(&changed, &config, &changed_arguments,
+                                      &options) == VPS_IDENTITY_OK &&
+                   vps_identity_compare(&base, &changed) ==
+                       VPS_IDENTITY_DIFFERENT,
+               "transaction_policy_difference");
+    vps_identity_cleanup(&changed);
+    vps_identity_cleanup(&base);
+    TEST_CHECK(vps_arguments_reset(&changed_arguments) == VPS_ARGUMENTS_OK &&
+                   vps_arguments_reset(&base_arguments) == VPS_ARGUMENTS_OK,
+               "transaction_policy_cleanup");
+    return 1;
+}
+
 static int test_fault_transaction(void)
 {
     TestFailAllocator state = {0};
@@ -388,7 +445,8 @@ static int test_fault_transaction(void)
 int main(void)
 {
     if (!test_equivalent_and_generation() || !test_relevant_field_matrix() ||
-        !test_mode_backend_and_bounds() || !test_fault_transaction()) {
+        !test_mode_backend_and_bounds() || !test_transaction_policy_identity() ||
+        !test_fault_transaction()) {
         return 1;
     }
     (void)printf("identity_tests=passed\n");

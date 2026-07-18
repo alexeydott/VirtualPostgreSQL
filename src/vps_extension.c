@@ -78,11 +78,11 @@ static void vps_capabilities_sql(sqlite3_context *context,
     (void)arguments;
 #if defined(VPS_ENABLE_QUERY_MATERIALIZATION)
     sqlite3_result_text(context,
-                        "read-only,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,query-materialization-memory,query-materialization-temp,metadata-placeholders", -1,
+                        "read-write,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,query-materialization-memory,query-materialization-temp,keyed-dml,transactions,savepoints,metadata-placeholders", -1,
                         SQLITE_STATIC);
 #else
     sqlite3_result_text(context,
-                        "read-only,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,metadata-placeholders", -1,
+                        "read-write,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,keyed-dml,transactions,savepoints,metadata-placeholders", -1,
                         SQLITE_STATIC);
 #endif
 }

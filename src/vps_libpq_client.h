@@ -32,7 +32,8 @@ typedef enum VpsLibpqConnectionStatus {
 typedef enum VpsLibpqTransactionStatus {
     VPS_LIBPQ_TRANSACTION_IDLE = 0,
     VPS_LIBPQ_TRANSACTION_ACTIVE = 1,
-    VPS_LIBPQ_TRANSACTION_UNKNOWN = 2
+    VPS_LIBPQ_TRANSACTION_INERROR = 2,
+    VPS_LIBPQ_TRANSACTION_UNKNOWN = 3
 } VpsLibpqTransactionStatus;
 
 typedef enum VpsLibpqPipelineStatus {

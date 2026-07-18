@@ -54,6 +54,23 @@ static int vps_exec_expect(sqlite3 *database, const char *sql)
     return 1;
 }
 
+static int vps_exec_expect_failure(sqlite3 *database, const char *sql,
+                                   int expected_primary)
+{
+    char *error_message = NULL;
+    int result = sqlite3_exec(database, sql, NULL, NULL, &error_message);
+    int passed = result != SQLITE_OK &&
+                 (expected_primary == 0 ||
+                  (result & 0xff) == expected_primary);
+    if (!passed)
+        (void)fprintf(stderr,
+                      "[host] level=error operation=expected-failure result=%d message=%.255s\n",
+                      result, error_message != NULL ? error_message
+                                                    : sqlite3_errmsg(database));
+    sqlite3_free(error_message);
+    return passed;
+}
+
 static int vps_expect(int condition, const char *operation, sqlite3 *database)
 {
     if (!condition) {
@@ -566,6 +583,111 @@ static int vps_dml_contour(sqlite3 *database, const char *connstr)
     return passed;
 }
 
+static int vps_transaction_contour(sqlite3 *database, const char *connstr)
+{
+    sqlite3_stmt *stream = NULL;
+    char *sql;
+    int passed = 1;
+    int step_result;
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_tx_a USING VirtualPostgreSQL("
+        "connstr=%Q,source=table,schema=public,table=vps_stage11_dml,mode=rw,"
+        "optimistic_lock=column,version_column=version)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_tx_b USING VirtualPostgreSQL("
+        "connstr=%Q,source=table,schema=public,table=vps_stage11_composite,mode=rw)",
+        connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+
+    passed &= vps_exec_expect(database, "BEGIN");
+    passed &= vps_exec_expect(
+        database,
+        "INSERT INTO vps_tx_a(payload,version,__vps_omit) "
+        "VALUES('tx-rollback',1,'id,nullable,bytes,amount,generated')");
+    passed &= vps_exec_expect(database, "ROLLBACK");
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST(count(*) AS TEXT) FROM vps_tx_a WHERE payload='tx-rollback'",
+        "0");
+
+    passed &= vps_exec_expect(database, "BEGIN");
+    passed &= vps_exec_expect(
+        database,
+        "INSERT INTO vps_tx_a(payload,version,__vps_omit) "
+        "VALUES('tx-keep',1,'id,nullable,bytes,amount,generated')");
+    passed &= vps_exec_expect(database, "SAVEPOINT user_name_is_not_forwarded");
+    passed &= vps_exec_expect(
+        database, "UPDATE vps_tx_a SET payload='tx-changed',version=2 "
+                  "WHERE payload='tx-keep'");
+    passed &= vps_exec_expect(database,
+                              "ROLLBACK TO user_name_is_not_forwarded");
+    passed &= vps_exec_expect(database, "RELEASE user_name_is_not_forwarded");
+    passed &= vps_exec_expect(
+        database,
+        "INSERT INTO vps_tx_b(tenant,code,payload,__vps_omit) "
+        "VALUES('tx',1200,'joined','')");
+    passed &= vps_exec_expect(database, "COMMIT");
+    passed &= vps_query_text(
+        database,
+        "SELECT payload FROM vps_tx_a WHERE payload IN ('tx-keep','tx-changed')",
+        "tx-keep");
+    passed &= vps_query_text(
+        database, "SELECT payload FROM vps_tx_b WHERE tenant='tx' AND code=1200",
+        "joined");
+
+    passed &= vps_exec_expect(database, "BEGIN");
+    passed &= vps_exec_expect(
+        database, "UPDATE vps_tx_a SET version=version+1 WHERE payload='tx-keep'");
+    passed &= vps_exec_expect(database, "SAVEPOINT aborted_recovery");
+    passed &= vps_exec_expect_failure(
+        database,
+        "INSERT OR FAIL INTO vps_tx_b(tenant,code,payload,__vps_omit) "
+        "VALUES('tx',1200,'duplicate','')", SQLITE_CONSTRAINT);
+    passed &= vps_expect(sqlite3_get_autocommit(database) == 0,
+                         "constraint-preserves-savepoint", database);
+    passed &= vps_exec_expect(database, "ROLLBACK TO aborted_recovery");
+    passed &= vps_exec_expect(database, "RELEASE aborted_recovery");
+    passed &= vps_exec_expect(
+        database, "UPDATE vps_tx_a SET version=version+1 WHERE payload='tx-keep'");
+    passed &= vps_exec_expect(database, "ROLLBACK");
+
+    passed &= vps_exec_expect(database, "BEGIN");
+    passed &= vps_exec_expect(
+        database, "UPDATE vps_tx_a SET version=version+1 WHERE payload='tx-keep'");
+    passed &= sqlite3_prepare_v2(database,
+                                "SELECT payload FROM vps_tx_a ORDER BY id",
+                                -1, &stream, NULL) == SQLITE_OK;
+    step_result = stream != NULL ? sqlite3_step(stream) : SQLITE_ERROR;
+    passed &= step_result == SQLITE_ROW;
+    passed &= vps_exec_expect_failure(
+        database, "DELETE FROM vps_tx_b WHERE tenant='tx' AND code=1200",
+        SQLITE_BUSY);
+    (void)sqlite3_finalize(stream);
+    stream = NULL;
+    if (sqlite3_get_autocommit(database) != 0) {
+        passed &= vps_exec_expect(database, "BEGIN");
+        passed &= vps_exec_expect(
+            database,
+            "UPDATE vps_tx_a SET version=version+1 WHERE payload='tx-keep'");
+    }
+    passed &= vps_exec_expect(
+        database, "DELETE FROM vps_tx_b WHERE tenant='tx' AND code=1200");
+    passed &= vps_exec_expect(database, "ROLLBACK");
+
+    passed &= vps_exec_expect(
+        database, "DELETE FROM vps_tx_a WHERE payload='tx-keep'");
+    passed &= vps_exec_expect(
+        database, "DELETE FROM vps_tx_b WHERE tenant='tx' AND code=1200");
+    (void)printf("[host] level=info operation=transaction-contour status=%s\n",
+                 passed ? "passed" : "failed");
+    return passed;
+}
+
 static char *vps_runtime_connstr(void)
 {
 #if defined(_WIN32)
@@ -673,6 +795,8 @@ int main(int argument_count, char **arguments)
             passed &= vps_runtime_contour(database, runtime_connstr, cancel);
             if (vps_environment_enabled("VPS_VTAB_TEST_DML"))
                 passed &= vps_dml_contour(database, runtime_connstr);
+            if (vps_environment_enabled("VPS_VTAB_TEST_TRANSACTIONS"))
+                passed &= vps_transaction_contour(database, runtime_connstr);
         }
     }
     result = sqlite3_close(database);

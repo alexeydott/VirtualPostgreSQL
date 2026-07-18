@@ -8,7 +8,8 @@ The project is under staged implementation. The Windows foundation now includes
 the extension ABI, secure connection/session runtime, async client port,
 versioned PostgreSQL metadata, the end-to-end virtual table path,
 conservative predicate/projection/order/limit pushdown, bounded streaming and
-database-scoped cancellation.
+database-scoped cancellation, keyed DML, and coordinated PostgreSQL
+transactions/savepoints.
 
 The normative requirements are maintained outside the tracked release set in
 `VirtualPostgreSQL_Technical_Specification.md`.
@@ -18,7 +19,7 @@ The normative requirements are maintained outside the tracked release set in
 Run the current Windows build and test matrix from PowerShell 7:
 
 ```powershell
-pwsh -NoProfile -File scripts/ci/run-stage9.ps1
+pwsh -NoProfile -File scripts/ci/run-stage12.ps1
 ```
 
 The gate builds and tests MSVC Win32 Debug, MSVC x64 Release, clang-cl x64 Debug
@@ -47,6 +48,7 @@ variables and do not read table rows. Product TLS policy remains
 | [Query sources](docs/query-sources.md) | Bounded query admission and read-only boundary |
 | [Read-only virtual table](docs/read-only-vtable.md) | SQLite callbacks, codecs, streaming and row identity |
 | [DML and stable identity](docs/dml-identity.md) | Keyed INSERT/UPDATE/DELETE, defaults and optimistic locking |
+| [Transactions and savepoints](docs/transactions-savepoints.md) | Callback mapping, pinned ownership, recovery and ambiguous outcomes |
 | [Planner and pushdown](docs/planner-pushdown.md) | Compiled plans, exactness, projection, ordering and cost |
 | [Streaming and cancellation](docs/streaming-cancellation.md) | Cursor states, limits, cleanup, cancel API and concurrency gates |
 

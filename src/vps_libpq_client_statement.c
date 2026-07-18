@@ -71,6 +71,20 @@ typedef struct VpsLibpqStatement {
     int cancel_terminal_seen;
 } VpsLibpqStatement;
 
+static void vps_libpq_statement_drain_results(VpsLibpqStatement *statement)
+{
+    size_t count;
+    VpsLibpqClient *client = statement->connection->client;
+    for (count = 0U; count < 16U; ++count) {
+        void *result = client->api.get_result(
+            client->api.context,
+            statement->connection->postgresql_connection);
+        if (result == NULL) return;
+        client->api.clear_result(client->api.context, result);
+    }
+    statement->connection->phase = VPS_LIBPQ_PHASE_FAILED;
+}
+
 static VpsErrorOperation vps_libpq_statement_error_operation(
     const VpsLibpqStatement *statement)
 {
@@ -143,7 +157,13 @@ static VpsClientStatus vps_libpq_statement_error(
             : "error",
         vps_error_class_name(error_class), sqlstate);
     statement->phase = VPS_LIBPQ_STATEMENT_FAILED;
-    statement->connection->phase = VPS_LIBPQ_PHASE_FAILED;
+    if (error_class == VPS_ERROR_CLASS_SQL) {
+        /* A drained server error preserves the connection for rollback or
+         * later idle use; transaction policy decides which command is legal. */
+        statement->connection->phase = VPS_LIBPQ_PHASE_READY;
+    } else {
+        statement->connection->phase = VPS_LIBPQ_PHASE_FAILED;
+    }
     if (error != NULL && error->initialized) {
         if (sqlstate != NULL) {
             error_result = vps_error_set_sqlstate(
@@ -511,6 +531,10 @@ VpsClientStatus vps_libpq_statement_start(
             return VPS_CLIENT_INVALID_STATE;
         }
     } else if (operation == VPS_CLIENT_OPERATION_FETCH) {
+        if ((!statement->spec.single_row &&
+             statement->phase == VPS_LIBPQ_STATEMENT_COMPLETE)) {
+            return VPS_CLIENT_OK;
+        }
         if (!statement->spec.single_row ||
             statement->phase != VPS_LIBPQ_STATEMENT_FETCH_WAIT) {
             return VPS_CLIENT_INVALID_STATE;
@@ -789,6 +813,7 @@ static VpsClientStatus vps_libpq_statement_finish_result(
         client->api.clear_result(client->api.context,
                                  statement->current_result);
         statement->current_result = NULL;
+        vps_libpq_statement_drain_results(statement);
         return failure_result;
     }
     check_result = mode == 0
@@ -960,6 +985,7 @@ static VpsClientStatus vps_libpq_statement_fetch_result(
         client->api.clear_result(client->api.context,
                                  statement->current_result);
         statement->current_result = NULL;
+        vps_libpq_statement_drain_results(statement);
         return failure;
     }
 }
@@ -995,6 +1021,10 @@ VpsClientStatus vps_libpq_statement_poll(
                     : VPS_CLIENT_WAIT_EXECUTE);
         }
         switch (statement->phase) {
+        case VPS_LIBPQ_STATEMENT_COMPLETE:
+            (void)memset(result, 0, sizeof(*result));
+            result->outcome = VPS_CLIENT_POLL_COMPLETE;
+            return VPS_CLIENT_OK;
         case VPS_LIBPQ_STATEMENT_CANCEL_POLL:
         {
             VpsLibpqPollingStatus cancel_status = client->api.cancel_poll(

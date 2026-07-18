@@ -318,9 +318,12 @@ static int vps_client_connection_start_allowed(
     case VPS_CLIENT_OPERATION_PING:
         return connection->state == VPS_CLIENT_CONNECTION_READY;
     case VPS_CLIENT_OPERATION_COMMIT:
-    case VPS_CLIENT_OPERATION_ROLLBACK:
         return connection->state ==
                VPS_CLIENT_CONNECTION_TRANSACTION_ACTIVE;
+    case VPS_CLIENT_OPERATION_ROLLBACK:
+        return connection->state ==
+                   VPS_CLIENT_CONNECTION_TRANSACTION_ACTIVE ||
+               connection->state == VPS_CLIENT_CONNECTION_FAILED;
     default:
         return 0;
     }
@@ -534,7 +537,8 @@ VpsClientStatus vps_client_statement_open(
                                VPS_CLIENT_INVALID_ARGUMENT);
     }
     if ((connection->state != VPS_CLIENT_CONNECTION_READY &&
-         connection->state != VPS_CLIENT_CONNECTION_TRANSACTION_ACTIVE) ||
+         connection->state != VPS_CLIENT_CONNECTION_TRANSACTION_ACTIVE &&
+         connection->state != VPS_CLIENT_CONNECTION_FAILED) ||
         connection->active_operation != VPS_CLIENT_OPERATION_NONE ||
         connection->statement_count != 0U) {
         return vps_client_fail(error, VPS_CLIENT_OPERATION_PREPARE,
@@ -768,6 +772,9 @@ VpsClientStatus vps_client_statement_poll(
         statement->state = VPS_CLIENT_STATEMENT_FAILED;
         return vps_client_fail(error, operation, VPS_CLIENT_INVALID_STATE);
     }
+    if (statement->connection->state == VPS_CLIENT_CONNECTION_FAILED)
+        statement->connection->state =
+            VPS_CLIENT_CONNECTION_TRANSACTION_ACTIVE;
     vps_client_log(client, VPS_LOG_LEVEL_DEBUG, operation,
                    vps_client_statement_state_name(statement->state),
                    "complete");

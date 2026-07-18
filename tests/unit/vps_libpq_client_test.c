@@ -361,6 +361,12 @@ static int fake_send_params(void *context, void *connection,
         fake->current_command = 5;
     } else if (strcmp(query, "DISCARD ALL") == 0) {
         fake->current_command = 6;
+    } else if (strcmp(query, "BEGIN") == 0) {
+        fake->current_command = 7;
+    } else if (strcmp(query, "COMMIT") == 0) {
+        fake->current_command = 8;
+    } else if (strcmp(query, "ROLLBACK") == 0) {
+        fake->current_command = 9;
     } else {
         fake->current_command = 3;
     }
@@ -431,6 +437,10 @@ static void *fake_get_result(void *context, void *connection)
         return &fake->result_token;
     }
     if (fake->get_result_step++ == 0) return &fake->result_token;
+    if (fake->current_command == 7)
+        fake->transaction_status = VPS_LIBPQ_TRANSACTION_ACTIVE;
+    else if (fake->current_command == 8 || fake->current_command == 9)
+        fake->transaction_status = VPS_LIBPQ_TRANSACTION_IDLE;
     return NULL;
 }
 
@@ -1355,6 +1365,60 @@ static int test_ping_reset_health(void)
     return 1;
 }
 
+static int test_connection_transactions(void)
+{
+    TestFixture fixture;
+    FakePlatform platform;
+    VpsPlatformOperations platform_operations;
+    VpsClientConnection *connection = NULL;
+    TEST_CHECK(test_fixture_init(&fixture, &platform, &platform_operations,
+                                 NULL), "transaction_fixture");
+    fixture.fake.polls[0] = VPS_LIBPQ_POLL_OK;
+    fixture.fake.poll_length = 1U;
+    TEST_CHECK(vps_client_connection_open(&fixture.client, &connection,
+                                          &fixture.error) == VPS_CLIENT_OK &&
+                   vps_client_connection_start(
+                       connection, VPS_CLIENT_OPERATION_CONNECT,
+                       &fixture.error) == VPS_CLIENT_OK &&
+                   test_drive(connection, &fixture.error) == VPS_CLIENT_OK,
+               "transaction_connect");
+    TEST_CHECK(vps_client_connection_start(
+                   connection, VPS_CLIENT_OPERATION_BEGIN,
+                   &fixture.error) == VPS_CLIENT_OK &&
+                   test_drive(connection, &fixture.error) == VPS_CLIENT_OK &&
+                   vps_client_connection_state(connection) ==
+                       VPS_CLIENT_CONNECTION_TRANSACTION_ACTIVE &&
+                   fixture.fake.transaction_status ==
+                       VPS_LIBPQ_TRANSACTION_ACTIVE,
+               "transaction_begin");
+    TEST_CHECK(vps_client_connection_start(
+                   connection, VPS_CLIENT_OPERATION_COMMIT,
+                   &fixture.error) == VPS_CLIENT_OK &&
+                   test_drive(connection, &fixture.error) == VPS_CLIENT_OK &&
+                   vps_client_connection_state(connection) ==
+                       VPS_CLIENT_CONNECTION_READY &&
+                   fixture.fake.transaction_status ==
+                       VPS_LIBPQ_TRANSACTION_IDLE,
+               "transaction_commit");
+    TEST_CHECK(vps_client_connection_start(
+                   connection, VPS_CLIENT_OPERATION_BEGIN,
+                   &fixture.error) == VPS_CLIENT_OK &&
+                   test_drive(connection, &fixture.error) == VPS_CLIENT_OK,
+               "transaction_second_begin");
+    fixture.fake.transaction_status = VPS_LIBPQ_TRANSACTION_INERROR;
+    TEST_CHECK(vps_client_connection_start(
+                   connection, VPS_CLIENT_OPERATION_ROLLBACK,
+                   &fixture.error) == VPS_CLIENT_OK &&
+                   test_drive(connection, &fixture.error) == VPS_CLIENT_OK &&
+                   fixture.fake.transaction_status ==
+                       VPS_LIBPQ_TRANSACTION_IDLE,
+               "transaction_aborted_rollback");
+    TEST_CHECK(vps_client_connection_close(&connection) == VPS_CLIENT_OK &&
+                   test_fixture_cleanup(&fixture),
+               "transaction_cleanup");
+    return 1;
+}
+
 static int test_health_dirty_rejection(void)
 {
     TestFixture fixture;
@@ -1656,6 +1720,7 @@ int main(void)
         !test_partial_and_fault_cleanup() ||
         !test_invalid_socket_and_readiness() ||
         !test_ping_reset_health() ||
+        !test_connection_transactions() ||
         !test_health_dirty_rejection() ||
         !test_strict_reset_and_reset_failure() ||
         !test_secure_cancel_and_failure() ||

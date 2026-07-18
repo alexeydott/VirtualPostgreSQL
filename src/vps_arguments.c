@@ -41,7 +41,9 @@ static const VpsArgumentDefinition vps_argument_definitions[] = {
     {"pool_readonly_separate", VPS_ARGUMENT_TYPE_BOOLEAN, 5U, 0},
     {"metadata_mode", VPS_ARGUMENT_TYPE_ENUM, 8U, 0},
     {"query_indexes", VPS_ARGUMENT_TYPE_STRING, 8192U, 0},
-    {"query_materialization", VPS_ARGUMENT_TYPE_ENUM, 6U, 0}};
+    {"query_materialization", VPS_ARGUMENT_TYPE_ENUM, 6U, 0},
+    {"isolation", VPS_ARGUMENT_TYPE_ENUM, 16U, 0},
+    {"transaction_read_only", VPS_ARGUMENT_TYPE_BOOLEAN, 5U, 0}};
 
 _Static_assert(sizeof(vps_argument_definitions) /
                        sizeof(vps_argument_definitions[0]) ==
@@ -302,6 +304,19 @@ static int vps_argument_parse_enum(VpsArgumentId argument_id,
         }
         if (length == 4U && memcmp(value, "temp", 4U) == 0) {
             *parsed = VPS_ARGUMENT_ENUM_MATERIALIZATION_TEMP;
+            return 1;
+        }
+    } else if (argument_id == VPS_ARGUMENT_ID_ISOLATION) {
+        if (length == 14U && memcmp(value, "read_committed", 14U) == 0) {
+            *parsed = VPS_ARGUMENT_ENUM_ISOLATION_READ_COMMITTED;
+            return 1;
+        }
+        if (length == 15U && memcmp(value, "repeatable_read", 15U) == 0) {
+            *parsed = VPS_ARGUMENT_ENUM_ISOLATION_REPEATABLE_READ;
+            return 1;
+        }
+        if (length == 12U && memcmp(value, "serializable", 12U) == 0) {
+            *parsed = VPS_ARGUMENT_ENUM_ISOLATION_SERIALIZABLE;
             return 1;
         }
     }

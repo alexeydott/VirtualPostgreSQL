@@ -22,6 +22,7 @@ SQLITE_EXTENSION_INIT3
 #include "vps_session.h"
 #include "vps_table_metadata.h"
 #include "vps_tls_policy.h"
+#include "vps_transaction.h"
 #include "vps_type_codec.h"
 #if defined(_WIN32)
 #include "vps_wincred_provider.h"
@@ -66,8 +67,10 @@ typedef struct VpsTable {
     size_t key_column_count;
     VpsRowIdentityMode identity_mode;
     VpsDmlOptimisticMode optimistic_mode;
+    VpsArgumentEnumValue transaction_isolation;
     size_t visible_field_count;
     int mode_rw;
+    int transaction_read_only;
     int source_is_query;
     int has_hidden_identity;
     int initialized_table_metadata;
@@ -125,6 +128,7 @@ typedef struct VpsCursor {
     uint64_t scan_counter;
     int64_t rowid;
     size_t row_bytes;
+    int transaction_stream;
 #if defined(VPS_ENABLE_QUERY_MATERIALIZATION)
     VpsQueryCacheLease snapshot_lease;
     VpsEmbeddedSqliteScan *snapshot_scan;
@@ -167,9 +171,18 @@ VpsModuleContext *vps_module_context_create(sqlite3 *database)
     }
     (void)memset(context, 0, sizeof(*context));
     context->database = database;
+    if (vps_allocator_system(&context->transaction_allocator) != VPS_MEMORY_OK ||
+        vps_transaction_init(&context->transaction,
+                             &context->transaction_allocator, NULL) !=
+            VPS_TRANSACTION_OK) {
+        sqlite3_free(context);
+        return NULL;
+    }
+    context->initialized_transaction = 1;
     if (vps_cancel_registry_init(&context->cancel_registry,
                                  vps_platform_current_operations(), NULL) !=
         VPS_CANCEL_REGISTRY_OK) {
+        vps_transaction_cleanup(&context->transaction);
         sqlite3_free(context);
         return NULL;
     }
@@ -182,6 +195,12 @@ void vps_module_context_destroy(void *opaque)
     VpsModuleContext *context = (VpsModuleContext *)opaque;
     if (context == NULL) return;
     context->closing = 1;
+    if (context->transaction_lease.pool != NULL)
+        (void)vps_connection_lease_release(&context->transaction_lease,
+                                           VPS_CONNECTION_LEASE_DIRTY);
+    context->transaction_connection = NULL;
+    if (context->initialized_transaction)
+        vps_transaction_cleanup(&context->transaction);
     if (context->initialized_cancel_registry)
         (void)vps_cancel_registry_cleanup(&context->cancel_registry);
     sqlite3_free(context);
@@ -768,6 +787,19 @@ static int vps_table_initialize_runtime(VpsTable *table,
     mode = vps_arguments_get(&table->arguments, VPS_ARGUMENT_ID_MODE);
     table->mode_rw = mode != NULL && mode->present &&
                      mode->enum_value == VPS_ARGUMENT_ENUM_MODE_RW;
+    {
+        const VpsArgumentValue *isolation = vps_arguments_get(
+            &table->arguments, VPS_ARGUMENT_ID_ISOLATION);
+        const VpsArgumentValue *read_only = vps_arguments_get(
+            &table->arguments, VPS_ARGUMENT_ID_TRANSACTION_READ_ONLY);
+        table->transaction_isolation =
+            isolation != NULL && isolation->present
+                ? isolation->enum_value
+                : VPS_ARGUMENT_ENUM_ISOLATION_READ_COMMITTED;
+        table->transaction_read_only =
+            read_only != NULL && read_only->present &&
+            read_only->boolean_value;
+    }
     table->optimistic_mode = VPS_DML_OPTIMISTIC_OFF;
     if (table->mode_rw) {
         const char *optimistic;
@@ -1638,6 +1670,13 @@ static int vps_cursor_release(VpsCursor *cursor)
                                            : VPS_CONNECTION_LEASE_DIRTY) !=
             VPS_CONNECTION_POOL_OK)
         clean = 0;
+    if (cursor->transaction_stream) {
+        if (vps_transaction_stream_end(
+                &cursor->table->module_context->transaction) !=
+            VPS_TRANSACTION_OK)
+            clean = 0;
+        cursor->transaction_stream = 0;
+    }
     cursor->connection = NULL;
     if (cursor->initialized_planned_query) {
         vps_buffer_reset(&cursor->planned_query);
@@ -1770,6 +1809,13 @@ static int vps_cursor_advance(VpsCursor *cursor, VpsError *error)
         if (vps_cursor_transition(&cursor->machine,
                                   VPS_CURSOR_EVENT_COMPLETE) != VPS_CURSOR_OK)
             goto failed;
+        if (vps_client_statement_close(&cursor->statement) != VPS_CLIENT_OK)
+            goto failed;
+        if (cursor->transaction_stream) {
+            (void)vps_transaction_stream_end(
+                &cursor->table->module_context->transaction);
+            cursor->transaction_stream = 0;
+        }
         return SQLITE_OK;
     }
     status = vps_client_statement_current_row(cursor->statement, &row, error);
@@ -1840,6 +1886,15 @@ static int vps_cursor_advance(VpsCursor *cursor, VpsError *error)
         goto failed;
     return SQLITE_OK;
 failed:
+    if (cursor->transaction_stream) {
+        (void)vps_transaction_mark_failed(
+            &cursor->table->module_context->transaction,
+            error != NULL && error->sqlstate[0] != '\0' ? error->sqlstate
+                                                        : NULL);
+        (void)vps_transaction_stream_end(
+            &cursor->table->module_context->transaction);
+        cursor->transaction_stream = 0;
+    }
     vps_cursor_row_reset(cursor);
     (void)vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_FAIL);
     return vps_vtab_set_error(&cursor->table->base,
@@ -2469,14 +2524,42 @@ static int vps_module_filter(sqlite3_vtab_cursor *base,
     }
     if (vps_error_init(&error, &table->allocator) == VPS_MEMORY_OK)
         error_initialized = 1;
-    status = vps_connection_pool_acquire(
-                 table->pool, &table->pool_key, 10000U, NULL, NULL,
-                 &cursor->lease) == VPS_CONNECTION_POOL_OK
-                 ? VPS_CLIENT_OK
-                 : VPS_CLIENT_BACKEND_ERROR;
-    if (status == VPS_CLIENT_OK)
-        cursor->connection =
-            (VpsClientConnection *)cursor->lease.connection;
+    {
+        VpsTransactionStatus transaction_status;
+        VpsTransactionResult transaction_result = vps_transaction_status(
+            &table->module_context->transaction, &transaction_status);
+        if (transaction_result == VPS_TRANSACTION_OK &&
+            transaction_status.state != VPS_TRANSACTION_IDLE) {
+            transaction_result = vps_transaction_begin(
+                &table->module_context->transaction, &table->identity,
+                table->table_id);
+            if (transaction_result == VPS_TRANSACTION_OK)
+                transaction_result = vps_transaction_stream_begin(
+                    &table->module_context->transaction);
+            if (transaction_result == VPS_TRANSACTION_OK &&
+                table->module_context->transaction_connection != NULL) {
+                cursor->connection =
+                    table->module_context->transaction_connection;
+                cursor->transaction_stream = 1;
+                status = VPS_CLIENT_OK;
+            } else {
+                return vps_vtab_set_error(
+                    &table->base,
+                    transaction_result == VPS_TRANSACTION_BUSY
+                        ? SQLITE_BUSY : SQLITE_ABORT,
+                    NULL, "VirtualPostgreSQL transaction stream unavailable");
+            }
+        } else {
+            status = vps_connection_pool_acquire(
+                         table->pool, &table->pool_key, 10000U, NULL, NULL,
+                         &cursor->lease) == VPS_CONNECTION_POOL_OK
+                         ? VPS_CLIENT_OK
+                         : VPS_CLIENT_BACKEND_ERROR;
+            if (status == VPS_CLIENT_OK)
+                cursor->connection =
+                    (VpsClientConnection *)cursor->lease.connection;
+        }
+    }
     (void)memset(&spec, 0, sizeof(spec));
     spec.query = (const char *)cursor->planned_query.data;
     spec.query_length = cursor->planned_query.size;
@@ -2845,6 +2928,7 @@ static int vps_module_update(sqlite3_vtab *base,
     int plan_initialized = 0;
     int bytes_initialized = 0;
     int clean = 0;
+    int in_transaction = 0;
     int result = SQLITE_ERROR;
     const char *failure = "dispatch";
     if (table == NULL || arguments == NULL || !table->mode_rw ||
@@ -2942,12 +3026,32 @@ static int vps_module_update(sqlite3_vtab *base,
                 plan.returning_visible[index]].declared_type_oid;
         fields[index].format = VPS_CLIENT_VALUE_TEXT;
     }
-    if (vps_connection_pool_acquire(table->pool, &table->pool_key, 10000U,
-                                    NULL, NULL, &lease) !=
-        VPS_CONNECTION_POOL_OK)
-        goto cleanup;
+    {
+        VpsTransactionStatus transaction_status;
+        if (vps_transaction_status(&table->module_context->transaction,
+                                   &transaction_status) == VPS_TRANSACTION_OK &&
+            transaction_status.state != VPS_TRANSACTION_IDLE) {
+            VpsTransactionResult transaction_result =
+                vps_transaction_command_allowed(
+                    &table->module_context->transaction);
+            if (transaction_result != VPS_TRANSACTION_OK) {
+                result = transaction_result == VPS_TRANSACTION_BUSY
+                             ? SQLITE_BUSY : SQLITE_ABORT;
+                failure = vps_transaction_result_name(transaction_result);
+                goto cleanup;
+            }
+            connection = table->module_context->transaction_connection;
+            if (connection == NULL) goto cleanup;
+            in_transaction = 1;
+        } else if (vps_connection_pool_acquire(
+                       table->pool, &table->pool_key, 10000U,
+                       NULL, NULL, &lease) != VPS_CONNECTION_POOL_OK) {
+            goto cleanup;
+        }
+    }
     failure = "statement execution";
-    connection = (VpsClientConnection *)lease.connection;
+    if (!in_transaction)
+        connection = (VpsClientConnection *)lease.connection;
     spec.query = (const char *)plan.query.data;
     spec.query_length = plan.query.size;
     spec.parameters = parameters;
@@ -3044,6 +3148,11 @@ static int vps_module_update(sqlite3_vtab *base,
         result = SQLITE_CONSTRAINT;
     }
 cleanup:
+    if (in_transaction && result != SQLITE_OK && status != VPS_CLIENT_OK)
+        (void)vps_transaction_mark_failed(
+            &table->module_context->transaction,
+            error_initialized && error.sqlstate[0] != '\0'
+                ? error.sqlstate : NULL);
     if (statement != NULL &&
         vps_client_statement_close(&statement) != VPS_CLIENT_OK)
         clean = 0;
@@ -3056,6 +3165,8 @@ cleanup:
     if (result != SQLITE_OK)
     {
         char fallback[128];
+        if (error_initialized && error.sqlite_code != SQLITE_OK)
+            result = error.sqlite_code;
         (void)snprintf(fallback, sizeof(fallback),
                        "VirtualPostgreSQL DML failed at %s", failure);
         result = vps_vtab_set_error(
@@ -3065,6 +3176,269 @@ cleanup:
     }
     if (error_initialized) vps_error_reset(&error);
     return result;
+}
+
+static int vps_module_transaction_statement(VpsTable *table,
+                                            const char *query,
+                                            VpsErrorOperation operation,
+                                            VpsError *error)
+{
+    VpsClientStatementSpec spec;
+    VpsClientStatement *statement = NULL;
+    VpsClientStatus status;
+    (void)memset(&spec, 0, sizeof(spec));
+    spec.query = query;
+    spec.query_length = strlen(query);
+    spec.timeout_ms = 60000U;
+    spec.error_operation = operation;
+    status = vps_client_statement_open(
+        table->module_context->transaction_connection, &spec, &statement,
+        error);
+    if (status == VPS_CLIENT_OK)
+        status = vps_client_statement_start(statement,
+                                            VPS_CLIENT_OPERATION_EXECUTE,
+                                            error);
+    if (status == VPS_CLIENT_OK)
+        status = vps_drive_statement(statement, NULL, error);
+    if (status == VPS_CLIENT_OK &&
+        vps_client_statement_state(statement) !=
+            VPS_CLIENT_STATEMENT_COMPLETE)
+        status = vps_client_statement_start(statement,
+                                            VPS_CLIENT_OPERATION_FETCH,
+                                            error);
+    if (status == VPS_CLIENT_OK &&
+        vps_client_statement_state(statement) !=
+            VPS_CLIENT_STATEMENT_COMPLETE)
+        status = vps_drive_statement(statement, NULL, error);
+    if (status == VPS_CLIENT_OK &&
+        vps_client_statement_state(statement) !=
+            VPS_CLIENT_STATEMENT_COMPLETE)
+        status = VPS_CLIENT_BACKEND_ERROR;
+    if (statement != NULL &&
+        vps_client_statement_close(&statement) != VPS_CLIENT_OK)
+        status = VPS_CLIENT_BACKEND_ERROR;
+    return status == VPS_CLIENT_OK ? SQLITE_OK : SQLITE_ERROR;
+}
+
+static int vps_module_begin(sqlite3_vtab *base)
+{
+    VpsTable *table = (VpsTable *)base;
+    VpsModuleContext *context;
+    VpsTransactionResult transaction_result;
+    VpsError error;
+    VpsClientStatus status = VPS_CLIENT_BACKEND_ERROR;
+    int error_initialized = 0;
+    if (table == NULL || !table->mode_rw || table->module_context == NULL)
+        return SQLITE_READONLY;
+    context = table->module_context;
+    context->transaction.logger = &table->logger;
+    transaction_result = vps_transaction_begin(
+        &context->transaction, &table->identity, table->table_id);
+    if (transaction_result == VPS_TRANSACTION_OK) return SQLITE_OK;
+    if (transaction_result != VPS_TRANSACTION_COMMAND_REQUIRED)
+        return vps_vtab_set_error(
+            base,
+            transaction_result == VPS_TRANSACTION_BUSY ? SQLITE_BUSY
+                : transaction_result == VPS_TRANSACTION_IDENTITY_MISMATCH
+                      ? SQLITE_CONSTRAINT : SQLITE_ABORT,
+            NULL, "VirtualPostgreSQL transaction participant rejected");
+    (void)memset(&context->transaction_lease, 0,
+                 sizeof(context->transaction_lease));
+    (void)memset(&error, 0, sizeof(error));
+    if (vps_error_init(&error, &table->allocator) == VPS_MEMORY_OK)
+        error_initialized = 1;
+    if (vps_connection_pool_acquire(
+            table->pool, &table->pool_key, 10000U, NULL, NULL,
+            &context->transaction_lease) == VPS_CONNECTION_POOL_OK) {
+        context->transaction_connection =
+            (VpsClientConnection *)context->transaction_lease.connection;
+        status = vps_client_connection_start(
+            context->transaction_connection, VPS_CLIENT_OPERATION_BEGIN,
+            error_initialized ? &error : NULL);
+        if (status == VPS_CLIENT_OK)
+            status = vps_drive_connection(
+                context->transaction_connection,
+                error_initialized ? &error : NULL);
+    }
+    if (status == VPS_CLIENT_OK) {
+        const char *isolation =
+            table->transaction_isolation ==
+                    VPS_ARGUMENT_ENUM_ISOLATION_REPEATABLE_READ
+                ? "REPEATABLE READ"
+                : table->transaction_isolation ==
+                          VPS_ARGUMENT_ENUM_ISOLATION_SERIALIZABLE
+                      ? "SERIALIZABLE" : "READ COMMITTED";
+        char options_query[128];
+        int written = snprintf(
+            options_query, sizeof(options_query),
+            "SET TRANSACTION ISOLATION LEVEL %s %s", isolation,
+            table->transaction_read_only ? "READ ONLY" : "READ WRITE");
+        if (written <= 0 || (size_t)written >= sizeof(options_query) ||
+            vps_module_transaction_statement(
+                table, options_query, VPS_ERROR_OPERATION_QUERY,
+                error_initialized ? &error : NULL) != SQLITE_OK)
+            status = VPS_CLIENT_BACKEND_ERROR;
+    }
+    if (status == VPS_CLIENT_OK) {
+        (void)vps_transaction_begin_complete(&context->transaction, 1);
+        if (error_initialized) vps_error_reset(&error);
+        return SQLITE_OK;
+    }
+    (void)vps_transaction_begin_complete(&context->transaction, 0);
+    if (context->transaction_lease.pool != NULL)
+        (void)vps_connection_lease_release(
+            &context->transaction_lease, VPS_CONNECTION_LEASE_DIRTY);
+    context->transaction_connection = NULL;
+    {
+        int sqlite_result = vps_vtab_set_error(
+            base, SQLITE_ERROR, error_initialized ? &error : NULL,
+            "VirtualPostgreSQL BEGIN failed");
+        if (error_initialized) vps_error_reset(&error);
+        return sqlite_result;
+    }
+}
+
+static int vps_module_sync(sqlite3_vtab *base)
+{
+    VpsTable *table = (VpsTable *)base;
+    VpsTransactionStatus status;
+    VpsTransactionResult result;
+    if (table == NULL || table->module_context == NULL) return SQLITE_MISUSE;
+    if (vps_transaction_status(&table->module_context->transaction, &status) !=
+            VPS_TRANSACTION_OK || status.state == VPS_TRANSACTION_IDLE)
+        return SQLITE_OK;
+    result = vps_transaction_command_allowed(
+        &table->module_context->transaction);
+    return result == VPS_TRANSACTION_OK ? SQLITE_OK
+           : result == VPS_TRANSACTION_BUSY ? SQLITE_BUSY
+                                            : SQLITE_ABORT;
+}
+
+static int vps_module_end(sqlite3_vtab *base,
+                          VpsTransactionEndOperation operation)
+{
+    VpsTable *table = (VpsTable *)base;
+    VpsModuleContext *context;
+    VpsTransactionResult transaction_result;
+    VpsClientOperation client_operation;
+    VpsError error;
+    VpsClientStatus status;
+    int connection_lost;
+    int result;
+    if (table == NULL || table->module_context == NULL) return SQLITE_MISUSE;
+    context = table->module_context;
+    transaction_result = vps_transaction_end(&context->transaction, operation);
+    if (transaction_result == VPS_TRANSACTION_OK) return SQLITE_OK;
+    if (transaction_result != VPS_TRANSACTION_COMMAND_REQUIRED)
+        return transaction_result == VPS_TRANSACTION_BUSY ? SQLITE_BUSY
+                                                           : SQLITE_ABORT;
+    if (vps_error_init(&error, &table->allocator) != VPS_MEMORY_OK)
+        return SQLITE_NOMEM;
+    client_operation = operation == VPS_TRANSACTION_END_COMMIT
+                           ? VPS_CLIENT_OPERATION_COMMIT
+                           : VPS_CLIENT_OPERATION_ROLLBACK;
+    status = context->transaction_connection != NULL
+                 ? vps_client_connection_start(context->transaction_connection,
+                                               client_operation, &error)
+                 : VPS_CLIENT_INVALID_STATE;
+    if (status == VPS_CLIENT_OK)
+        status = vps_drive_connection(context->transaction_connection, &error);
+    connection_lost = status != VPS_CLIENT_OK &&
+        (error.error_class == VPS_ERROR_CLASS_CONNECTION ||
+         error.error_class == VPS_ERROR_CLASS_TIMEOUT ||
+         error.error_class == VPS_ERROR_CLASS_CANCEL);
+    if (connection_lost) error.ambiguous = 1;
+    transaction_result = vps_transaction_end_complete(
+        &context->transaction, status == VPS_CLIENT_OK, connection_lost);
+    if (context->transaction_lease.pool != NULL)
+        (void)vps_connection_lease_release(
+            &context->transaction_lease,
+            status == VPS_CLIENT_OK ? VPS_CONNECTION_LEASE_CLEAN
+                                    : VPS_CONNECTION_LEASE_DIRTY);
+    context->transaction_connection = NULL;
+    result = status == VPS_CLIENT_OK && transaction_result == VPS_TRANSACTION_OK
+                 ? SQLITE_OK
+                 : vps_vtab_set_error(
+                       base, SQLITE_ERROR, &error,
+                       connection_lost
+                           ? "VirtualPostgreSQL transaction outcome is ambiguous"
+                           : "VirtualPostgreSQL transaction end failed");
+    vps_error_reset(&error);
+    return result;
+}
+
+static int vps_module_commit(sqlite3_vtab *base)
+{
+    return vps_module_end(base, VPS_TRANSACTION_END_COMMIT);
+}
+
+static int vps_module_rollback(sqlite3_vtab *base)
+{
+    return vps_module_end(base, VPS_TRANSACTION_END_ROLLBACK);
+}
+
+static int vps_module_savepoint_action(sqlite3_vtab *base,
+                                       int level,
+                                       int action)
+{
+    VpsTable *table = (VpsTable *)base;
+    VpsTransactionResult transaction_result;
+    VpsError error;
+    char query[96];
+    int written;
+    int result;
+    if (table == NULL || table->module_context == NULL || level < 0)
+        return SQLITE_MISUSE;
+    if (action == 0)
+        transaction_result = vps_transaction_savepoint(
+            &table->module_context->transaction, level);
+    else if (action == 1)
+        transaction_result = vps_transaction_release(
+            &table->module_context->transaction, level);
+    else
+        transaction_result = vps_transaction_rollback_to(
+            &table->module_context->transaction, level);
+    if (transaction_result == VPS_TRANSACTION_OK) return SQLITE_OK;
+    if (transaction_result != VPS_TRANSACTION_COMMAND_REQUIRED)
+        return transaction_result == VPS_TRANSACTION_BUSY ? SQLITE_BUSY
+                                                           : SQLITE_ABORT;
+    written = snprintf(query, sizeof(query),
+                       action == 0 ? "SAVEPOINT vps_%d"
+                       : action == 1 ? "RELEASE SAVEPOINT vps_%d"
+                                     : "ROLLBACK TO SAVEPOINT vps_%d",
+                       level);
+    if (written <= 0 || (size_t)written >= sizeof(query)) return SQLITE_TOOBIG;
+    if (vps_error_init(&error, &table->allocator) != VPS_MEMORY_OK)
+        return SQLITE_NOMEM;
+    result = vps_module_transaction_statement(
+        table, query,
+        action == 2 ? VPS_ERROR_OPERATION_ROLLBACK
+                    : VPS_ERROR_OPERATION_QUERY,
+        &error);
+    if (result != SQLITE_OK) {
+        (void)vps_transaction_mark_failed(
+            &table->module_context->transaction,
+            error.sqlstate[0] != '\0' ? error.sqlstate : NULL);
+        result = vps_vtab_set_error(base, SQLITE_ERROR, &error,
+                                    "VirtualPostgreSQL savepoint failed");
+    }
+    vps_error_reset(&error);
+    return result;
+}
+
+static int vps_module_savepoint(sqlite3_vtab *base, int level)
+{
+    return vps_module_savepoint_action(base, level, 0);
+}
+
+static int vps_module_release(sqlite3_vtab *base, int level)
+{
+    return vps_module_savepoint_action(base, level, 1);
+}
+
+static int vps_module_rollback_to(sqlite3_vtab *base, int level)
+{
+    return vps_module_savepoint_action(base, level, 2);
 }
 
 static int vps_module_shadow_name(const char *name)
@@ -3102,6 +3476,13 @@ const sqlite3_module VPS_MODULE = {
     .xColumn = vps_module_column,
     .xRowid = vps_module_rowid,
     .xUpdate = vps_module_update,
+    .xBegin = vps_module_begin,
+    .xSync = vps_module_sync,
+    .xCommit = vps_module_commit,
+    .xRollback = vps_module_rollback,
+    .xSavepoint = vps_module_savepoint,
+    .xRelease = vps_module_release,
+    .xRollbackTo = vps_module_rollback_to,
     .xShadowName = vps_module_shadow_name,
     .xIntegrity = vps_module_integrity
 };
