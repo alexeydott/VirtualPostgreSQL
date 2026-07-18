@@ -1514,6 +1514,8 @@ static int test_secure_cancel_and_failure(void)
                    vps_client_statement_state(statement) ==
                        VPS_CLIENT_STATEMENT_ROW_READY,
                "cancel_after_row");
+    fixture.adapter.interrupt_probe = fake_interrupt;
+    fixture.adapter.interrupt_context = &fixture;
     TEST_CHECK(vps_client_statement_start(
                    statement, VPS_CLIENT_OPERATION_CANCEL,
                    &fixture.error) == VPS_CLIENT_OK &&

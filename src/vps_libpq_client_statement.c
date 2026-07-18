@@ -66,6 +66,7 @@ typedef struct VpsLibpqStatement {
     int described;
     int deadline_started;
     int cancel_sqlstate_seen;
+    int cancel_terminal_seen;
 } VpsLibpqStatement;
 
 static void vps_libpq_statement_log(const VpsLibpqStatement *statement,
@@ -150,6 +151,25 @@ static VpsClientStatus vps_libpq_statement_error(
                : error_class == VPS_ERROR_CLASS_CONFIG
                      ? VPS_CLIENT_LIMIT_EXCEEDED
                      : VPS_CLIENT_BACKEND_ERROR;
+}
+
+static VpsClientStatus vps_libpq_statement_control_signal(
+    VpsLibpqStatement *statement,
+    VpsError *error,
+    VpsErrorClass error_class)
+{
+    if (statement == NULL ||
+        (error_class != VPS_ERROR_CLASS_TIMEOUT &&
+         error_class != VPS_ERROR_CLASS_CANCEL))
+        return VPS_CLIENT_INVALID_ARGUMENT;
+    vps_libpq_statement_log(statement, VPS_LOG_LEVEL_INFO,
+                            "libpq_statement", "control",
+                            vps_error_class_name(error_class), NULL);
+    if (error != NULL && error->initialized &&
+        vps_error_set_local(error, VPS_ERROR_OPERATION_QUERY, error_class,
+                            statement->query_fingerprint) != VPS_MEMORY_OK)
+        return VPS_CLIENT_OUT_OF_MEMORY;
+    return VPS_CLIENT_CONTROL_SIGNAL;
 }
 
 static uint64_t vps_libpq_statement_elapsed_ms(
@@ -514,6 +534,7 @@ VpsClientStatus vps_libpq_statement_start(
                 statement, error, VPS_ERROR_CLASS_CONNECTION, NULL);
         }
         statement->cancel_sqlstate_seen = 0;
+        statement->cancel_terminal_seen = 0;
         statement->phase = VPS_LIBPQ_STATEMENT_CANCEL_POLL;
         vps_libpq_statement_log(statement, VPS_LOG_LEVEL_INFO,
                                 "libpq_statement", "cancel", "started",
@@ -980,11 +1001,13 @@ VpsClientStatus vps_libpq_statement_poll(
                 client->api.context,
                 statement->connection->postgresql_connection);
             if (cancelled_result == NULL) {
-                if (!statement->cancel_sqlstate_seen) {
+                if (!statement->cancel_sqlstate_seen &&
+                    !statement->cancel_terminal_seen) {
                     return vps_libpq_statement_error(
                         statement, error, VPS_ERROR_CLASS_INVARIANT, NULL);
                 }
-                if (error != NULL && error->initialized) {
+                if (statement->cancel_sqlstate_seen && error != NULL &&
+                    error->initialized) {
                     (void)vps_error_set_sqlstate(
                         error, VPS_ERROR_OPERATION_CANCEL, "57014", 0, 0,
                         statement->query_fingerprint);
@@ -994,7 +1017,12 @@ VpsClientStatus vps_libpq_statement_poll(
                 result->outcome = VPS_CLIENT_POLL_COMPLETE;
                 vps_libpq_statement_log(statement, VPS_LOG_LEVEL_INFO,
                                         "libpq_statement", "cancel",
-                                        "drained", "57014");
+                                        statement->cancel_sqlstate_seen
+                                            ? "drained"
+                                            : "already_complete",
+                                        statement->cancel_sqlstate_seen
+                                            ? "57014"
+                                            : NULL);
                 return VPS_CLIENT_OK;
             }
             if (client->api.result_status(client->api.context,
@@ -1007,6 +1035,10 @@ VpsClientStatus vps_libpq_statement_poll(
                 if (sqlstate != NULL && strcmp(sqlstate, "57014") == 0) {
                     statement->cancel_sqlstate_seen = 1;
                 }
+            } else if (client->api.result_status(client->api.context,
+                                                 cancelled_result) ==
+                       VPS_LIBPQ_RESULT_TUPLES_OK) {
+                statement->cancel_terminal_seen = 1;
             }
             client->api.clear_result(client->api.context, cancelled_result);
             break;
@@ -1154,8 +1186,14 @@ VpsClientStatus vps_libpq_statement_wait(
     request.interest = (VpsWaitInterest)wait_request->interest;
     request.deadline = &statement->deadline;
     request.max_slice_ms = wait_request->max_slice_ms;
-    request.interrupt_probe = client->interrupt_probe;
-    request.interrupt_context = client->interrupt_context;
+    if (wait_request->phase != VPS_CLIENT_WAIT_CANCEL) {
+        request.interrupt_probe = statement->spec.interrupt_probe != NULL
+                                      ? statement->spec.interrupt_probe
+                                      : client->interrupt_probe;
+        request.interrupt_context = statement->spec.interrupt_probe != NULL
+                                        ? statement->spec.interrupt_context
+                                        : client->interrupt_context;
+    }
     request.logger = client->logger;
     request.phase = wait_request->phase == VPS_CLIENT_WAIT_CANCEL
                         ? VPS_WAIT_PHASE_CANCEL
@@ -1166,13 +1204,13 @@ VpsClientStatus vps_libpq_statement_wait(
         wait_result.outcome == VPS_SOCKET_WAIT_READY) return VPS_CLIENT_OK;
     if (deadline_status == VPS_DEADLINE_OK &&
         wait_result.outcome == VPS_SOCKET_WAIT_DEADLINE_EXPIRED) {
-        return vps_libpq_statement_error(statement, error,
-                                         VPS_ERROR_CLASS_TIMEOUT, NULL);
+        return vps_libpq_statement_control_signal(
+            statement, error, VPS_ERROR_CLASS_TIMEOUT);
     }
     if (deadline_status == VPS_DEADLINE_OK &&
         wait_result.outcome == VPS_SOCKET_WAIT_INTERRUPTED) {
-        return vps_libpq_statement_error(statement, error,
-                                         VPS_ERROR_CLASS_CANCEL, NULL);
+        return vps_libpq_statement_control_signal(
+            statement, error, VPS_ERROR_CLASS_CANCEL);
     }
     return vps_libpq_statement_error(statement, error,
                                      VPS_ERROR_CLASS_CONNECTION, NULL);

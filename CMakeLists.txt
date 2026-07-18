@@ -398,6 +398,36 @@ target_link_libraries(vps_client PUBLIC
 vps_apply_strict_warnings(vps_client)
 vps_apply_asan(vps_client)
 
+add_library(vps_cursor STATIC
+  src/vps_cursor.c
+)
+target_compile_features(vps_cursor PUBLIC c_std_11)
+set_target_properties(vps_cursor PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_cursor PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_cursor PUBLIC vps_logging)
+vps_apply_strict_warnings(vps_cursor)
+vps_apply_asan(vps_cursor)
+
+add_library(vps_cancel STATIC
+  src/vps_cancel.c
+)
+target_compile_features(vps_cancel PUBLIC c_std_11)
+set_target_properties(vps_cancel PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_cancel PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_cancel PUBLIC vps_deadline vps_logging vps_platform)
+vps_apply_strict_warnings(vps_cancel)
+vps_apply_asan(vps_cancel)
+
 add_library(vps_connection_pool STATIC
   src/vps_connection_pool.c
 )
@@ -833,6 +863,8 @@ if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
     vps_arguments
     vps_connection_string
     vps_connection_pool
+    vps_cancel
+    vps_cursor
     vps_identity
     vps_libpq_client
     vps_libpq_client_conninfo
@@ -1172,6 +1204,22 @@ if(BUILD_TESTING)
   vps_apply_asan(vps_planner_fuzz_smoke_test)
   add_test(NAME vps_planner_fuzz_smoke COMMAND vps_planner_fuzz_smoke_test)
 
+  add_executable(vps_cursor_test tests/unit/vps_cursor_test.c)
+  target_compile_features(vps_cursor_test PRIVATE c_std_11)
+  set_target_properties(vps_cursor_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_cursor_test PRIVATE vps_cursor)
+  vps_apply_strict_warnings(vps_cursor_test)
+  vps_apply_asan(vps_cursor_test)
+  add_test(NAME vps_cursor COMMAND vps_cursor_test)
+
+  add_executable(vps_cancel_test tests/unit/vps_cancel_test.c)
+  target_compile_features(vps_cancel_test PRIVATE c_std_11)
+  set_target_properties(vps_cancel_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_cancel_test PRIVATE vps_cancel)
+  vps_apply_strict_warnings(vps_cancel_test)
+  vps_apply_asan(vps_cancel_test)
+  add_test(NAME vps_cancel COMMAND vps_cancel_test)
+
   add_executable(vps_libpq_client_test
     tests/unit/vps_libpq_client_test.c
   )
@@ -1302,6 +1350,8 @@ if(BUILD_TESTING)
       vps_arguments
       vps_connection_string
       vps_connection_pool
+      vps_cancel
+      vps_cursor
       vps_identity
       vps_libpq_client
       vps_libpq_client_conninfo
@@ -1332,6 +1382,9 @@ if(BUILD_TESTING)
       "${VPS_SQLITE_AMALGAMATION_DIR}"
     )
     target_link_libraries(vps_extension_host_test PRIVATE vps_sqlite_host)
+    if(WIN32)
+      target_link_libraries(vps_extension_host_test PRIVATE psapi)
+    endif()
     vps_apply_strict_warnings(vps_extension_host_test)
     add_test(NAME vps_extension_host
       COMMAND vps_extension_host_test $<TARGET_FILE:virtualpostgresql>)

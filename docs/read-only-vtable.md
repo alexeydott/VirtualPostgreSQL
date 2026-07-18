@@ -10,11 +10,12 @@ derived from the server result descriptor; a failed connection or descriptor
 never falls back to a dummy schema.
 
 `xFilter` opens an independent async client connection and starts an extended
-protocol statement in single-row mode. `xNext` publishes one borrowed row at a
-time and propagates terminal or late PostgreSQL errors. Closing a cursor destroys
-its statement and connection, including partial and early-close paths. The basic
-Stage 7 plan intentionally performs no constraint, projection, ordering, limit,
-or offset pushdown; those belong to Stage 8.
+protocol statement in single-row mode. `xNext` publishes one cursor-owned
+decoded row at a time and propagates terminal or late PostgreSQL errors. The
+borrowed libpq result stays valid until the next step or close. Early close
+securely cancels and drains when bounded cleanup is possible; otherwise the
+connection is destroyed. Predicate, projection, ordering, limit and offset
+pushdown are described in the Stage 8 planner guide.
 
 ## Values and identity
 
@@ -41,3 +42,7 @@ Debug and clang-cl x64 ASan. Its optional local contour reads a catalog table,
 catalog view and validated query, including NULL, `bytea`, UUID, stable rowid and
 two interleaved cursors. Connection details are supplied only through process
 environment variables.
+
+Stage 9 extends this contour with explicit host cancellation, checked scan
+limits, late-error and early-close probes, bounded-RSS streaming and eight-way
+cursor concurrency. See [Streaming and cancellation](streaming-cancellation.md).

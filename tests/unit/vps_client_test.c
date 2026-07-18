@@ -41,7 +41,7 @@ typedef struct FakeBackend {
 static const char test_query[] = "SELECT 1";
 static const VpsClientStatementSpec test_statement_spec = {
     test_query, sizeof(test_query) - 1U, NULL, 0U, NULL, 0U,
-    UINT64_C(1000), 0, 0, 0};
+    UINT64_C(1000), 0, 0, 0, NULL, NULL};
 
 typedef struct TestLogCapture {
     size_t event_count;

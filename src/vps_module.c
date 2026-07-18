@@ -2,8 +2,10 @@
 SQLITE_EXTENSION_INIT3
 
 #include "vps_arguments.h"
+#include "vps_cancel.h"
 #include "vps_connection_string.h"
 #include "vps_connection_pool.h"
+#include "vps_cursor.h"
 #include "vps_identity.h"
 #include "vps_libpq_client.h"
 #include "vps_libpq_client_conninfo.h"
@@ -27,18 +29,9 @@ SQLITE_EXTENSION_INIT3
 #define VPS_VTAB_PARAMETER_LIMIT (VPS_PLAN_DEFAULT_IN_LIMIT + VPS_PLAN_MAX_CONSTRAINTS)
 #define VPS_VTAB_PARAMETER_BYTES_LIMIT (4U * 1024U * 1024U)
 
-typedef enum VpsCursorState {
-    VPS_CURSOR_NEW = 0,
-    VPS_CURSOR_OPEN = 1,
-    VPS_CURSOR_FILTERING = 2,
-    VPS_CURSOR_ROW_READY = 3,
-    VPS_CURSOR_EOF = 4,
-    VPS_CURSOR_FAILED = 5,
-    VPS_CURSOR_CLOSED = 6
-} VpsCursorState;
-
 typedef struct VpsTable {
     sqlite3_vtab base;
+    sqlite3 *database;
     VpsAllocator allocator;
     VpsLogger logger;
 #if defined(_WIN32)
@@ -96,9 +89,14 @@ typedef struct VpsCursor {
     VpsClientResultFieldExpectation *projected_fields;
     size_t projected_fields_size;
     uint16_t logical_to_remote[VPS_PLAN_MAX_COLUMNS];
+    VpsDecodedValue decoded[VPS_PLAN_MAX_COLUMNS];
+    VpsBuffer identity_token;
     int initialized_planned_query;
     int initialized_parameter_bytes;
-    VpsCursorState state;
+    int initialized_identity_token;
+    VpsCursorMachine machine;
+    VpsCancelToken cancel_token;
+    VpsCursorBudget budget;
     uint64_t cursor_id;
     uint64_t scan_counter;
     int64_t rowid;
@@ -118,11 +116,34 @@ static VpsConnectionPoolResult vps_vtab_pool_ready(void *context,
 static void vps_vtab_pool_destroy(void *context, void *connection);
 static int vps_vtab_uuid_canonical(const unsigned char *value, size_t length);
 
-VpsModuleContext *vps_module_context_create(void)
+static VpsInterruptProbeResult vps_cursor_interrupt_probe(void *context)
+{
+    VpsCursor *cursor = (VpsCursor *)context;
+    if (cursor == NULL || cursor->table == NULL ||
+        cursor->table->database == NULL)
+        return VPS_INTERRUPT_PROBE_ERROR;
+    if (sqlite3_is_interrupted(cursor->table->database))
+        return VPS_INTERRUPT_REQUESTED;
+    return vps_cancel_token_probe(&cursor->cancel_token);
+}
+
+VpsModuleContext *vps_module_context_create(sqlite3 *database)
 {
     VpsModuleContext *context =
         (VpsModuleContext *)sqlite3_malloc64(sizeof(*context));
-    if (context != NULL) (void)memset(context, 0, sizeof(*context));
+    if (context == NULL || database == NULL) {
+        sqlite3_free(context);
+        return NULL;
+    }
+    (void)memset(context, 0, sizeof(*context));
+    context->database = database;
+    if (vps_cancel_registry_init(&context->cancel_registry,
+                                 vps_platform_current_operations(), NULL) !=
+        VPS_CANCEL_REGISTRY_OK) {
+        sqlite3_free(context);
+        return NULL;
+    }
+    context->initialized_cancel_registry = 1;
     return context;
 }
 
@@ -131,6 +152,8 @@ void vps_module_context_destroy(void *opaque)
     VpsModuleContext *context = (VpsModuleContext *)opaque;
     if (context == NULL) return;
     context->closing = 1;
+    if (context->initialized_cancel_registry)
+        (void)vps_cancel_registry_cleanup(&context->cancel_registry);
     sqlite3_free(context);
 }
 
@@ -271,6 +294,7 @@ static void vps_vtab_pool_destroy(void *context, void *connection)
 }
 
 static VpsClientStatus vps_drive_statement(VpsClientStatement *statement,
+                                           VpsCursorMachine *machine,
                                            VpsError *error)
 {
     size_t attempt;
@@ -280,11 +304,37 @@ static VpsClientStatus vps_drive_statement(VpsClientStatement *statement,
             vps_client_statement_poll(statement, &poll, error);
         if (status != VPS_CLIENT_OK) return status;
         if (poll.outcome == VPS_CLIENT_POLL_COMPLETE ||
-            poll.outcome == VPS_CLIENT_POLL_ROW_READY)
+            poll.outcome == VPS_CLIENT_POLL_ROW_READY) {
+            if (machine != NULL && machine->state == VPS_CURSOR_WAITING &&
+                vps_cursor_transition(machine, VPS_CURSOR_EVENT_RESUME) !=
+                    VPS_CURSOR_OK)
+                return VPS_CLIENT_INVALID_STATE;
             return VPS_CLIENT_OK;
+        }
         if (poll.outcome != VPS_CLIENT_POLL_WAIT)
             return VPS_CLIENT_BACKEND_ERROR;
+        if (machine != NULL &&
+            vps_cursor_transition(machine, VPS_CURSOR_EVENT_WAIT) !=
+                VPS_CURSOR_OK)
+            return VPS_CLIENT_INVALID_STATE;
         status = vps_client_statement_wait(statement, &poll.wait, error);
+        if (status != VPS_CLIENT_OK && machine != NULL && error != NULL &&
+            error->initialized &&
+            (error->sqlite_code == SQLITE_INTERRUPT ||
+             error->error_class == VPS_ERROR_CLASS_TIMEOUT ||
+             error->error_class == VPS_ERROR_CLASS_CANCEL)) {
+            if (vps_cursor_transition(machine, VPS_CURSOR_EVENT_CANCEL) !=
+                    VPS_CURSOR_OK ||
+                vps_client_statement_start(statement,
+                                           VPS_CLIENT_OPERATION_CANCEL,
+                                           error) != VPS_CLIENT_OK)
+                return VPS_CLIENT_BACKEND_ERROR;
+            continue;
+        }
+        if (machine != NULL &&
+            vps_cursor_transition(machine, VPS_CURSOR_EVENT_RESUME) !=
+                VPS_CURSOR_OK)
+            return VPS_CLIENT_INVALID_STATE;
         if (status != VPS_CLIENT_OK) return status;
     }
     return VPS_CLIENT_LIMIT_EXCEEDED;
@@ -580,7 +630,8 @@ static int vps_table_describe(VpsTable *table, VpsError *error)
     if (status == VPS_CLIENT_OK)
         status = vps_client_statement_start(
             statement, VPS_CLIENT_OPERATION_PREPARE, error);
-    if (status == VPS_CLIENT_OK) status = vps_drive_statement(statement, error);
+    if (status == VPS_CLIENT_OK)
+        status = vps_drive_statement(statement, NULL, error);
     if (status == VPS_CLIENT_OK &&
         vps_query_describe_result_init(&table->described,
                                        &table->allocator) ==
@@ -738,6 +789,7 @@ static int vps_module_connect(sqlite3 *database,
     table = (VpsTable *)sqlite3_malloc64(sizeof(*table));
     if (table == NULL) return SQLITE_NOMEM;
     (void)memset(table, 0, sizeof(*table));
+    table->database = database;
     table->module_context = (VpsModuleContext *)auxiliary;
     if (table->module_context == NULL || table->module_context->closing) {
         sqlite3_free(table);
@@ -1003,19 +1055,82 @@ static int vps_module_open(sqlite3_vtab *base,
     if (cursor == NULL) return SQLITE_NOMEM;
     (void)memset(cursor, 0, sizeof(*cursor));
     cursor->table = table;
-    cursor->state = VPS_CURSOR_OPEN;
     cursor->cursor_id = ++table->next_cursor_id;
+    {
+        VpsCursorLimits limits;
+        vps_cursor_limits_default(&limits);
+        if (vps_cursor_budget_init(&cursor->budget, &limits,
+                                   cursor->cursor_id, &table->logger) !=
+            VPS_CURSOR_LIMIT_OK) {
+            sqlite3_free(cursor);
+            return SQLITE_ERROR;
+        }
+    }
+    if (vps_cursor_machine_init(&cursor->machine, cursor->cursor_id,
+                                &table->logger) != VPS_CURSOR_OK ||
+        vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_OPEN) !=
+            VPS_CURSOR_OK ||
+        vps_cancel_token_register(&table->module_context->cancel_registry,
+                                  &cursor->cancel_token,
+                                  cursor->cursor_id) !=
+            VPS_CANCEL_REGISTRY_OK) {
+        sqlite3_free(cursor);
+        return SQLITE_ERROR;
+    }
     table->active_cursors += 1U;
     *cursor_out = &cursor->base;
     return SQLITE_OK;
 }
 
+static void vps_cursor_row_reset(VpsCursor *cursor)
+{
+    size_t index;
+    if (cursor == NULL) return;
+    for (index = 0U; index < VPS_PLAN_MAX_COLUMNS; ++index)
+        vps_decoded_value_reset(&cursor->decoded[index]);
+    if (cursor->initialized_identity_token) {
+        vps_buffer_reset(&cursor->identity_token);
+        cursor->initialized_identity_token = 0;
+    }
+    cursor->row = NULL;
+    cursor->row_bytes = 0U;
+}
+
 static int vps_cursor_release(VpsCursor *cursor)
 {
     int clean = 1;
-    VpsConnectionLeaseDisposition disposition =
-        cursor->state == VPS_CURSOR_EOF ? VPS_CONNECTION_LEASE_CLEAN
-                                        : VPS_CONNECTION_LEASE_DIRTY;
+    int drained = cursor->machine.state == VPS_CURSOR_EOF;
+    VpsConnectionLeaseDisposition disposition;
+    if (cursor->statement != NULL &&
+        (cursor->machine.state == VPS_CURSOR_FILTERING ||
+         cursor->machine.state == VPS_CURSOR_WAITING ||
+         cursor->machine.state == VPS_CURSOR_ROW_READY)) {
+        VpsError cancel_error;
+        int error_initialized =
+            vps_error_init(&cancel_error, &cursor->table->allocator) ==
+            VPS_MEMORY_OK;
+        if (!error_initialized ||
+            vps_cursor_transition(&cursor->machine,
+                                  VPS_CURSOR_EVENT_CANCEL) != VPS_CURSOR_OK ||
+            vps_client_statement_start(cursor->statement,
+                                       VPS_CLIENT_OPERATION_CANCEL,
+                                       error_initialized ? &cancel_error
+                                                         : NULL) !=
+                VPS_CLIENT_OK ||
+            vps_drive_statement(cursor->statement, &cursor->machine,
+                                error_initialized ? &cancel_error : NULL) !=
+                VPS_CLIENT_OK ||
+            vps_cursor_transition(&cursor->machine,
+                                  VPS_CURSOR_EVENT_COMPLETE) != VPS_CURSOR_OK) {
+            clean = 0;
+        } else {
+            drained = 1;
+        }
+        if (error_initialized) vps_error_reset(&cancel_error);
+    }
+    disposition = drained ? VPS_CONNECTION_LEASE_CLEAN
+                          : VPS_CONNECTION_LEASE_DIRTY;
+    vps_cursor_row_reset(cursor);
     if (cursor->statement != NULL &&
         vps_client_statement_close(&cursor->statement) != VPS_CLIENT_OK)
         clean = 0;
@@ -1026,7 +1141,6 @@ static int vps_cursor_release(VpsCursor *cursor)
             VPS_CONNECTION_POOL_OK)
         clean = 0;
     cursor->connection = NULL;
-    cursor->row = NULL;
     if (cursor->initialized_planned_query) {
         vps_buffer_reset(&cursor->planned_query);
         cursor->initialized_planned_query = 0;
@@ -1044,7 +1158,6 @@ static int vps_cursor_release(VpsCursor *cursor)
     cursor->parameters_size = 0U;
     cursor->projected_fields_size = 0U;
     cursor->parameter_count = 0U;
-    cursor->state = VPS_CURSOR_CLOSED;
     return clean ? SQLITE_OK : SQLITE_ERROR;
 }
 
@@ -1056,6 +1169,12 @@ static int vps_module_close(sqlite3_vtab_cursor *base)
     if (cursor == NULL) return SQLITE_OK;
     table = cursor->table;
     result = vps_cursor_release(cursor);
+    if (vps_cancel_token_unregister(&cursor->cancel_token) !=
+        VPS_CANCEL_REGISTRY_OK)
+        result = SQLITE_ERROR;
+    if (vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_CLOSE) !=
+        VPS_CURSOR_OK)
+        result = SQLITE_ERROR;
     if (table != NULL && table->active_cursors != 0U)
         table->active_cursors -= 1U;
     sqlite3_free(cursor);
@@ -1067,19 +1186,35 @@ static int vps_cursor_advance(VpsCursor *cursor, VpsError *error)
     VpsClientStatus status;
     const VpsClientRowView *row = NULL;
     size_t index;
+    size_t largest_column = 0U;
     if (cursor->row != NULL) {
+        if (vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_FETCH) !=
+            VPS_CURSOR_OK)
+            goto failed;
+        vps_cursor_row_reset(cursor);
         status = vps_client_statement_row_consumed(cursor->statement, error);
-        cursor->row = NULL;
         if (status != VPS_CLIENT_OK) goto failed;
     }
     status = vps_client_statement_start(cursor->statement,
                                         VPS_CLIENT_OPERATION_FETCH, error);
     if (status == VPS_CLIENT_OK)
-        status = vps_drive_statement(cursor->statement, error);
+        status = vps_drive_statement(cursor->statement, &cursor->machine,
+                                     error);
     if (status != VPS_CLIENT_OK) goto failed;
+    if (cursor->machine.state == VPS_CURSOR_CANCELLING && error != NULL &&
+        error->initialized &&
+        vps_client_statement_state(cursor->statement) ==
+            VPS_CLIENT_STATEMENT_COMPLETE)
+        (void)vps_error_set_sqlstate(error, VPS_ERROR_OPERATION_CANCEL,
+                                     "57014", 0, 0, NULL);
+    if (error != NULL && error->initialized &&
+        error->sqlite_code == SQLITE_INTERRUPT)
+        goto failed;
     if (vps_client_statement_state(cursor->statement) ==
         VPS_CLIENT_STATEMENT_COMPLETE) {
-        cursor->state = VPS_CURSOR_EOF;
+        if (vps_cursor_transition(&cursor->machine,
+                                  VPS_CURSOR_EVENT_COMPLETE) != VPS_CURSOR_OK)
+            goto failed;
         return SQLITE_OK;
     }
     status = vps_client_statement_current_row(cursor->statement, &row, error);
@@ -1089,10 +1224,23 @@ static int vps_cursor_advance(VpsCursor *cursor, VpsError *error)
     cursor->row_bytes = 0U;
     for (index = 0U; index < vps_client_row_column_count(row); ++index) {
         VpsClientColumnView column;
+        size_t logical;
+        VpsCodecId codec;
         if (vps_client_row_column(row, index, &column, error) != VPS_CLIENT_OK ||
             column.length > SIZE_MAX - cursor->row_bytes)
             goto failed;
         cursor->row_bytes += column.length;
+        if (column.length > largest_column) largest_column = column.length;
+        if (index >= cursor->plan.projection_count) goto failed;
+        logical = cursor->plan.projection[index];
+        if (logical >= VPS_PLAN_MAX_COLUMNS ||
+            cursor->decoded[logical].initialized)
+            goto failed;
+        codec = vps_type_codec_for_oid(column.type_oid);
+        if (vps_type_codec_decode(&cursor->table->allocator, codec, &column,
+                                  &cursor->decoded[logical]) !=
+            VPS_TYPE_CODEC_OK)
+            goto failed;
     }
     if (cursor->table->identity_mode == VPS_ROW_IDENTITY_STABLE_INTEGER) {
         VpsClientColumnView key;
@@ -1106,15 +1254,61 @@ static int vps_cursor_advance(VpsCursor *cursor, VpsError *error)
             vps_row_identity_stable_integer(&key, &cursor->rowid) !=
                 VPS_ROW_IDENTITY_OK)
             goto failed;
+    } else if (cursor->table->identity_mode ==
+               VPS_ROW_IDENTITY_HIDDEN_TOKEN) {
+        VpsClientColumnView keys[VPS_QUERY_METADATA_MAX_KEY_COLUMNS];
+        size_t key_index;
+        (void)memset(keys, 0, sizeof(keys));
+        for (key_index = 0U;
+             key_index < cursor->table->key_column_count; ++key_index) {
+            size_t logical = cursor->table->key_columns[key_index];
+            if (logical >= VPS_PLAN_MAX_COLUMNS ||
+                cursor->logical_to_remote[logical] == UINT16_MAX ||
+                vps_client_row_column(
+                    row, cursor->logical_to_remote[logical], &keys[key_index],
+                    error) != VPS_CLIENT_OK)
+                goto failed;
+        }
+        if (vps_row_identity_token(&cursor->table->allocator, keys,
+                                   cursor->table->key_column_count,
+                                   &cursor->identity_token) !=
+            VPS_ROW_IDENTITY_OK)
+            goto failed;
+        cursor->initialized_identity_token = 1;
+        if (vps_row_identity_scan_next(&cursor->scan_counter,
+                                       &cursor->rowid) !=
+            VPS_ROW_IDENTITY_OK)
+            goto failed;
     } else if (vps_row_identity_scan_next(&cursor->scan_counter,
                                           &cursor->rowid) !=
                VPS_ROW_IDENTITY_OK) goto failed;
+    if (vps_cursor_budget_observe_row(
+            &cursor->budget, (uint64_t)cursor->row_bytes,
+            (uint64_t)largest_column,
+            cursor->initialized_identity_token
+                ? (uint64_t)cursor->identity_token.size
+                : 0U) != VPS_CURSOR_LIMIT_OK) {
+        if (error != NULL && error->initialized) {
+            (void)vps_error_set_local(error, VPS_ERROR_OPERATION_SCAN,
+                                      VPS_ERROR_CLASS_MEMORY, NULL);
+            error->sqlite_code = SQLITE_TOOBIG;
+        }
+        goto failed;
+    }
     cursor->row = row;
-    cursor->state = VPS_CURSOR_ROW_READY;
+    if (vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_ROW) !=
+        VPS_CURSOR_OK)
+        goto failed;
     return SQLITE_OK;
 failed:
-    cursor->state = VPS_CURSOR_FAILED;
-    return vps_vtab_set_error(&cursor->table->base, SQLITE_ERROR, error,
+    vps_cursor_row_reset(cursor);
+    (void)vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_FAIL);
+    return vps_vtab_set_error(&cursor->table->base,
+                              error != NULL && error->initialized &&
+                                      error->sqlite_code != SQLITE_OK
+                                  ? error->sqlite_code
+                                  : SQLITE_ERROR,
+                              error,
                               "VirtualPostgreSQL scan failed");
 }
 
@@ -1477,20 +1671,32 @@ static int vps_module_filter(sqlite3_vtab_cursor *base,
     size_t index_string_length;
     if (cursor == NULL || index_number != (int)VPS_PLAN_FORMAT_VERSION ||
         index_string == NULL || argument_count < 0 ||
-        (cursor->state != VPS_CURSOR_OPEN && cursor->state != VPS_CURSOR_EOF))
+        (cursor->machine.state != VPS_CURSOR_OPEN &&
+         cursor->machine.state != VPS_CURSOR_EOF))
         return SQLITE_MISUSE;
     table = cursor->table;
     (void)vps_cursor_release(cursor);
-    cursor->state = VPS_CURSOR_FILTERING;
+    if (vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_FILTER) !=
+        VPS_CURSOR_OK)
+        return SQLITE_MISUSE;
     cursor->scan_counter = 0U;
+    vps_cursor_budget_reset(&cursor->budget);
     index_string_length = strlen(index_string);
     if (vps_plan_decode(index_string, index_string_length,
                         table->source_fingerprint, &cursor->plan) !=
             VPS_PLANNER_OK ||
         !vps_vtab_build_execution(cursor, argument_count, arguments)) {
-        cursor->state = VPS_CURSOR_FAILED;
+        (void)vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_FAIL);
         return vps_vtab_set_error(&table->base, SQLITE_CORRUPT_VTAB, NULL,
                                   "VirtualPostgreSQL compiled plan rejected");
+    }
+    if (vps_cursor_budget_check_query(
+            &cursor->budget, (uint64_t)cursor->planned_query.size,
+            (uint64_t)cursor->parameter_bytes.size,
+            0U) != VPS_CURSOR_LIMIT_OK) {
+        (void)vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_FAIL);
+        return vps_vtab_set_error(&table->base, SQLITE_TOOBIG, NULL,
+                                  "VirtualPostgreSQL scan limit exceeded");
     }
     if (vps_error_init(&error, &table->allocator) == VPS_MEMORY_OK)
         error_initialized = 1;
@@ -1511,6 +1717,8 @@ static int vps_module_filter(sqlite3_vtab_cursor *base,
     spec.result_field_count = cursor->plan.projection_count;
     spec.timeout_ms = 60000U;
     spec.single_row = 1;
+    spec.interrupt_probe = vps_cursor_interrupt_probe;
+    spec.interrupt_context = cursor;
     if (status == VPS_CLIENT_OK)
         status = vps_client_statement_open(cursor->connection, &spec,
                                            &cursor->statement, &error);
@@ -1519,12 +1727,18 @@ static int vps_module_filter(sqlite3_vtab_cursor *base,
                                             VPS_CLIENT_OPERATION_EXECUTE,
                                             &error);
     if (status == VPS_CLIENT_OK)
-        status = vps_drive_statement(cursor->statement, &error);
-    result = status == VPS_CLIENT_OK ? vps_cursor_advance(cursor, &error)
-                                    : vps_vtab_set_error(
-                                          &table->base, SQLITE_ERROR, &error,
-                                          "VirtualPostgreSQL filter failed");
-    if (status != VPS_CLIENT_OK) cursor->state = VPS_CURSOR_FAILED;
+        status = vps_drive_statement(cursor->statement, &cursor->machine,
+                                     &error);
+    result = status == VPS_CLIENT_OK
+                 ? vps_cursor_advance(cursor, &error)
+                 : vps_vtab_set_error(
+                       &table->base,
+                       error_initialized && error.sqlite_code != SQLITE_OK
+                           ? error.sqlite_code
+                           : SQLITE_ERROR,
+                       &error, "VirtualPostgreSQL filter failed");
+    if (status != VPS_CLIENT_OK)
+        (void)vps_cursor_transition(&cursor->machine, VPS_CURSOR_EVENT_FAIL);
     if (error_initialized) vps_error_reset(&error);
     return result;
 }
@@ -1534,7 +1748,7 @@ static int vps_module_next(sqlite3_vtab_cursor *base)
     VpsCursor *cursor = (VpsCursor *)base;
     VpsError error;
     int result;
-    if (cursor == NULL || cursor->state != VPS_CURSOR_ROW_READY)
+    if (cursor == NULL || cursor->machine.state != VPS_CURSOR_ROW_READY)
         return SQLITE_MISUSE;
     if (vps_error_init(&error, &cursor->table->allocator) != VPS_MEMORY_OK)
         return SQLITE_NOMEM;
@@ -1546,7 +1760,7 @@ static int vps_module_next(sqlite3_vtab_cursor *base)
 static int vps_module_eof(sqlite3_vtab_cursor *base)
 {
     const VpsCursor *cursor = (const VpsCursor *)base;
-    return cursor == NULL || cursor->state == VPS_CURSOR_EOF;
+    return cursor == NULL || cursor->machine.state == VPS_CURSOR_EOF;
 }
 
 static int vps_module_column(sqlite3_vtab_cursor *base,
@@ -1554,80 +1768,45 @@ static int vps_module_column(sqlite3_vtab_cursor *base,
                              int column_index)
 {
     VpsCursor *cursor = (VpsCursor *)base;
-    VpsClientColumnView column;
-    VpsDecodedValue decoded;
-    VpsCodecId codec;
-    VpsError error;
-    VpsTypeCodecResult result;
+    const VpsDecodedValue *decoded;
     if (cursor == NULL || context == NULL || cursor->row == NULL ||
         column_index < 0 ||
         (size_t)column_index > cursor->table->described.field_count)
         return SQLITE_MISUSE;
     if ((size_t)column_index == cursor->table->described.field_count) {
-        VpsClientColumnView keys[VPS_QUERY_METADATA_MAX_KEY_COLUMNS];
-        VpsBuffer token;
-        size_t key_index;
         if (cursor->table->identity_mode != VPS_ROW_IDENTITY_HIDDEN_TOKEN)
             return SQLITE_MISUSE;
-        (void)memset(keys, 0, sizeof(keys));
-        for (key_index = 0U;
-             key_index < cursor->table->key_column_count; ++key_index) {
-            size_t logical = cursor->table->key_columns[key_index];
-            if (logical >= VPS_PLAN_MAX_COLUMNS ||
-                cursor->logical_to_remote[logical] == UINT16_MAX)
-                return SQLITE_CORRUPT_VTAB;
-            if (vps_client_row_column(
-                    cursor->row, cursor->logical_to_remote[logical],
-                    &keys[key_index], NULL) != VPS_CLIENT_OK)
-                return SQLITE_ERROR;
-        }
-        if (vps_row_identity_token(&cursor->table->allocator, keys,
-                                   cursor->table->key_column_count,
-                                   &token) != VPS_ROW_IDENTITY_OK)
-            return SQLITE_ERROR;
-        sqlite3_result_blob64(context, token.data, (sqlite3_uint64)token.size,
+        if (!cursor->initialized_identity_token) return SQLITE_CORRUPT_VTAB;
+        sqlite3_result_blob64(context, cursor->identity_token.data,
+                              (sqlite3_uint64)cursor->identity_token.size,
                               SQLITE_TRANSIENT);
-        vps_buffer_reset(&token);
         return SQLITE_OK;
     }
-    if (vps_error_init(&error, &cursor->table->allocator) != VPS_MEMORY_OK)
-        return SQLITE_NOMEM;
     if ((size_t)column_index >= VPS_PLAN_MAX_COLUMNS ||
         cursor->logical_to_remote[column_index] == UINT16_MAX ||
-        vps_client_row_column(cursor->row,
-                              cursor->logical_to_remote[column_index], &column,
-                              &error) != VPS_CLIENT_OK) {
-        vps_error_reset(&error);
-        return SQLITE_ERROR;
-    }
-    codec = vps_type_codec_for_oid(column.type_oid);
-    result = vps_type_codec_decode(&cursor->table->allocator, codec, &column,
-                                   &decoded);
-    if (result != VPS_TYPE_CODEC_OK) {
-        vps_error_reset(&error);
-        return vps_vtab_set_error(&cursor->table->base, SQLITE_MISMATCH, NULL,
-                                  "VirtualPostgreSQL column conversion failed");
-    }
-    switch (decoded.kind) {
+        !cursor->decoded[column_index].initialized)
+        return SQLITE_CORRUPT_VTAB;
+    decoded = &cursor->decoded[column_index];
+    switch (decoded->kind) {
         case VPS_DECODED_NULL: sqlite3_result_null(context); break;
         case VPS_DECODED_INTEGER:
-            sqlite3_result_int64(context, (sqlite3_int64)decoded.integer);
+            sqlite3_result_int64(context, (sqlite3_int64)decoded->integer);
             break;
-        case VPS_DECODED_REAL: sqlite3_result_double(context, decoded.real); break;
+        case VPS_DECODED_REAL:
+            sqlite3_result_double(context, decoded->real);
+            break;
         case VPS_DECODED_TEXT:
-            sqlite3_result_text64(context, (const char *)decoded.bytes,
-                                  (sqlite3_uint64)decoded.length,
+            sqlite3_result_text64(context, (const char *)decoded->bytes,
+                                  (sqlite3_uint64)decoded->length,
                                   SQLITE_TRANSIENT, SQLITE_UTF8);
             break;
         case VPS_DECODED_BLOB:
-            sqlite3_result_blob64(context, decoded.bytes,
-                                  (sqlite3_uint64)decoded.length,
+            sqlite3_result_blob64(context, decoded->bytes,
+                                  (sqlite3_uint64)decoded->length,
                                   SQLITE_TRANSIENT);
             break;
         default: sqlite3_result_error(context, "invalid codec state", -1); break;
     }
-    vps_decoded_value_reset(&decoded);
-    vps_error_reset(&error);
     return SQLITE_OK;
 }
 
@@ -1636,7 +1815,7 @@ static int vps_module_rowid(sqlite3_vtab_cursor *base,
 {
     const VpsCursor *cursor = (const VpsCursor *)base;
     if (cursor == NULL || rowid_out == NULL ||
-        cursor->state != VPS_CURSOR_ROW_READY) return SQLITE_MISUSE;
+        cursor->machine.state != VPS_CURSOR_ROW_READY) return SQLITE_MISUSE;
     *rowid_out = (sqlite3_int64)cursor->rowid;
     return SQLITE_OK;
 }

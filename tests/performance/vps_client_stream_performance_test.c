@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define VPS_STREAM_TEST_ROWS UINT64_C(1000000)
 
@@ -110,6 +111,8 @@ int main(void)
     VpsClientResultFieldExpectation field={23U,VPS_CLIENT_VALUE_TEXT};
     uint64_t index;
     size_t stable_allocations;
+    clock_t started;
+    clock_t first_row_at = 0;
     (void)memset(&backend,0,sizeof(backend));
     (void)memset(&operations,0,sizeof(operations));
     operations.structure_size=sizeof(operations);
@@ -145,6 +148,7 @@ int main(void)
         vps_client_statement_start(statement,VPS_CLIENT_OPERATION_EXECUTE,NULL)!=VPS_CLIENT_OK ||
         vps_client_statement_poll(statement,&poll,NULL)!=VPS_CLIENT_OK) return 1;
     stable_allocations=fault.active_allocations;
+    started=clock();
     for(index=0U;index<VPS_STREAM_TEST_ROWS;++index){
         const VpsClientRowView *row=NULL; VpsClientColumnView column;
         if(vps_client_statement_start(statement,VPS_CLIENT_OPERATION_FETCH,NULL)!=VPS_CLIENT_OK ||
@@ -154,6 +158,7 @@ int main(void)
            vps_client_row_column(row,0U,&column,NULL)!=VPS_CLIENT_OK ||
            column.length!=1U || fault.active_allocations!=stable_allocations ||
            vps_client_statement_row_consumed(statement,NULL)!=VPS_CLIENT_OK) return 1;
+        if(index==0U) first_row_at=clock();
     }
     if(vps_client_statement_start(statement,VPS_CLIENT_OPERATION_FETCH,NULL)!=VPS_CLIENT_OK ||
        vps_client_statement_poll(statement,&poll,NULL)!=VPS_CLIENT_OK ||
@@ -162,7 +167,10 @@ int main(void)
        vps_client_statement_close(&statement)!=VPS_CLIENT_OK ||
        vps_client_connection_close(&connection)!=VPS_CLIENT_OK ||
        vps_client_cleanup(&client)!=VPS_CLIENT_OK || fault.active_allocations!=0U) return 1;
-    (void)printf("client_stream rows=%u stable_allocations=%u status=passed\n",
-                 (unsigned int)VPS_STREAM_TEST_ROWS,(unsigned int)stable_allocations);
+    (void)printf("client_stream rows=%u stable_allocations=%u first_row_ticks=%lld total_ticks=%lld status=passed\n",
+                 (unsigned int)VPS_STREAM_TEST_ROWS,
+                 (unsigned int)stable_allocations,
+                 (long long)(first_row_at-started),
+                 (long long)(clock()-started));
     return 0;
 }

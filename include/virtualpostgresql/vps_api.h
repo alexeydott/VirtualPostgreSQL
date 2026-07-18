@@ -7,6 +7,8 @@
 extern "C" {
 #endif
 
+typedef struct sqlite3 sqlite3;
+
 #if defined(_WIN32)
 #  define VPS_CALL __cdecl
 #  if defined(VPS_BUILD_DLL)
@@ -47,6 +49,11 @@ typedef uint64_t VpsCredentialFields;
 #define VPS_CREDENTIAL_PROVIDER_UNAVAILABLE INT32_C(2)
 #define VPS_CREDENTIAL_PROVIDER_INVALID_REFERENCE INT32_C(3)
 #define VPS_CREDENTIAL_PROVIDER_ERROR INT32_C(4)
+
+#define VPS_CANCEL_OK INT32_C(0)
+#define VPS_CANCEL_INVALID_DATABASE INT32_C(1)
+#define VPS_CANCEL_UNAVAILABLE INT32_C(2)
+#define VPS_CANCEL_ERROR INT32_C(3)
 
 /*
  * present_fields bits for VpsCredentialProvider. A zero mask is accepted as
@@ -174,6 +181,8 @@ VPS_API uint32_t VPS_CALL virtualpostgresql_api_version(void);
 VPS_API uint32_t VPS_CALL virtualpostgresql_credential_config_structure_size(void);
 VPS_API uint32_t VPS_CALL virtualpostgresql_credential_lease_structure_size(void);
 VPS_API uint32_t VPS_CALL virtualpostgresql_credential_provider_structure_size(void);
+/* Thread-safe for a SQLite connection opened in serialized mode. */
+VPS_API int32_t VPS_CALL virtualpostgresql_cancel(sqlite3 *database);
 
 #ifdef __cplusplus
 }

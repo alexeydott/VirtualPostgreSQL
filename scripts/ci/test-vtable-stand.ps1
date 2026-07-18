@@ -49,4 +49,5 @@ try {
     [Environment]::SetEnvironmentVariable('VPS_VTAB_TEST_CONNSTR', $previous)
 }
 
-Write-Output 'vtable_stand status=passed sources=table,view,query planner=predicate,in,projection,order,limit,cost cursors=2'
+$bulk = [Environment]::GetEnvironmentVariable('VPS_VTAB_TEST_BULK') -eq '1'
+Write-Output "vtable_stand status=passed sources=table,view,query planner=predicate,in,projection,order,limit,cost cursors=2 bulk=$bulk"

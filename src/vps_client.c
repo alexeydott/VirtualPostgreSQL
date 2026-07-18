@@ -28,7 +28,7 @@ struct VpsClientStatement {
 
 static int vps_client_status_valid(VpsClientStatus status)
 {
-    return status >= VPS_CLIENT_OK && status <= VPS_CLIENT_BACKEND_ERROR;
+    return status >= VPS_CLIENT_OK && status <= VPS_CLIENT_CONTROL_SIGNAL;
 }
 
 static int vps_client_operation_valid(VpsClientOperation operation)
@@ -799,6 +799,12 @@ VpsClientStatus vps_client_statement_wait(
         statement->backend_statement, wait_request, error);
     if (!vps_client_status_valid(result)) result = VPS_CLIENT_BACKEND_ERROR;
     if (result != VPS_CLIENT_OK) {
+        if (result == VPS_CLIENT_CONTROL_SIGNAL) {
+            vps_client_log(statement->connection->client,
+                           VPS_LOG_LEVEL_INFO, operation, "wait",
+                           "control_signal");
+            return result;
+        }
         statement->state = VPS_CLIENT_STATEMENT_FAILED;
         statement->active_operation = VPS_CLIENT_OPERATION_NONE;
         vps_client_log(statement->connection->client, VPS_LOG_LEVEL_ERROR,
@@ -1009,6 +1015,7 @@ const char *vps_client_status_name(VpsClientStatus status)
     case VPS_CLIENT_OUT_OF_MEMORY: return "out_of_memory";
     case VPS_CLIENT_LIMIT_EXCEEDED: return "limit_exceeded";
     case VPS_CLIENT_BACKEND_ERROR: return "backend_error";
+    case VPS_CLIENT_CONTROL_SIGNAL: return "control_signal";
     default: return "unknown";
     }
 }

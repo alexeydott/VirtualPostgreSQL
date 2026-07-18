@@ -41,3 +41,4 @@ build configuration.
 
 - [Connection credentials](connection-credentials.md) — identity, TLS and baseline policy.
 - [Table metadata](table-metadata.md) — async catalog statements and snapshot ownership.
+- [Streaming and cancellation](streaming-cancellation.md) — cursor lifecycle, host cancel and limits.

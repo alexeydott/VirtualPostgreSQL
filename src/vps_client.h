@@ -2,6 +2,7 @@
 #define VPS_CLIENT_H
 
 #include "vps_error.h"
+#include "vps_deadline.h"
 #include "vps_logging.h"
 
 #include <stddef.h>
@@ -34,7 +35,9 @@ typedef enum VpsClientStatus {
     VPS_CLIENT_UNSUPPORTED = 3,
     VPS_CLIENT_OUT_OF_MEMORY = 4,
     VPS_CLIENT_LIMIT_EXCEEDED = 5,
-    VPS_CLIENT_BACKEND_ERROR = 6
+    VPS_CLIENT_BACKEND_ERROR = 6,
+    /* Interrupt/deadline observed while backend operation remains cancellable. */
+    VPS_CLIENT_CONTROL_SIGNAL = 7
 } VpsClientStatus;
 
 typedef enum VpsClientOperation {
@@ -159,6 +162,9 @@ typedef struct VpsClientStatementSpec {
     int single_row;
     /* Prepare/describe an initially unknown result layout without execution. */
     int discover_result_fields;
+    /* Optional statement-scoped probe overrides the client-wide probe. */
+    VpsInterruptProbe interrupt_probe;
+    void *interrupt_context;
 } VpsClientStatementSpec;
 
 typedef struct VpsClientStatementMetadata {

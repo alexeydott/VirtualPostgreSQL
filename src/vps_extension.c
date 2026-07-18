@@ -3,11 +3,27 @@ SQLITE_EXTENSION_INIT1
 
 #include "vps_module.h"
 #include "vps_libpq_client.h"
+#include "virtualpostgresql/vps_api.h"
 
 #include <stdint.h>
 
 #define VPS_MINIMUM_SQLITE_VERSION_NUMBER 3044000
-#define VPS_EXTENSION_VERSION "0.8.0"
+#define VPS_EXTENSION_VERSION "0.9.0"
+
+int32_t VPS_CALL virtualpostgresql_cancel(sqlite3 *database)
+{
+    VpsModuleContext *context;
+    if (database == NULL) return VPS_CANCEL_INVALID_DATABASE;
+    context = (VpsModuleContext *)sqlite3_get_clientdata(
+        database, VPS_MODULE_CLIENTDATA_KEY);
+    if (context == NULL || context->closing ||
+        !context->initialized_cancel_registry)
+        return VPS_CANCEL_UNAVAILABLE;
+    return vps_cancel_registry_request_all(&context->cancel_registry, NULL) ==
+                   VPS_CANCEL_REGISTRY_OK
+               ? VPS_CANCEL_OK
+               : VPS_CANCEL_ERROR;
+}
 
 static void vps_version_sql(sqlite3_context *context,
                             int argument_count,
@@ -53,7 +69,7 @@ static void vps_capabilities_sql(sqlite3_context *context,
     (void)argument_count;
     (void)arguments;
     sqlite3_result_text(context,
-                        "read-only,module-v4,xIntegrity,directonly,async-libpq,single-row,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,metadata-placeholders", -1,
+                        "read-only,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,metadata-placeholders", -1,
                         SQLITE_STATIC);
 }
 
@@ -119,7 +135,7 @@ int sqlite3_virtualpostgresql_init(sqlite3 *database,
     if (result != SQLITE_OK) {
         return result;
     }
-    module_context = vps_module_context_create();
+    module_context = vps_module_context_create(database);
     if (module_context == NULL) {
         return SQLITE_NOMEM;
     }
@@ -143,8 +159,11 @@ int sqlite3_virtualpostgresql_init(sqlite3 *database,
     if (result != SQLITE_OK) {
         return result;
     }
-    return sqlite3_create_module_v2(database,
-                                    "virtualpostgresql_index_info",
-                                    &VPS_METADATA_MODULE, module_context,
-                                    NULL);
+    result = sqlite3_create_module_v2(database,
+                                      "virtualpostgresql_index_info",
+                                      &VPS_METADATA_MODULE, module_context,
+                                      NULL);
+    if (result != SQLITE_OK) return result;
+    return sqlite3_set_clientdata(database, VPS_MODULE_CLIENTDATA_KEY,
+                                  module_context, NULL);
 }
