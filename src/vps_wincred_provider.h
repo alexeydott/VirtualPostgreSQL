@@ -81,6 +81,8 @@ VpsCredentialRegistryResult vps_wincred_provider_init_with_api(
 VpsCredentialRegistryResult vps_wincred_provider_make(
     VpsWinCredProviderContext *context,
     VpsCredentialProvider *provider);
+VpsCredentialRegistryResult vps_wincred_provider_public_make(
+    VpsCredentialProvider *provider);
 VpsCredentialRegistryResult vps_wincred_provider_cleanup(
     VpsWinCredProviderContext *context);
 

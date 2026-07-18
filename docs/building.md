@@ -1,31 +1,32 @@
 [Back to README](../README.md) · [Next: Connection and credentials →](connection-credentials.md)
 
-# Сборка Windows 1.0
+# Building Windows 1.0
 
-## Требования
+## Requirements
 
-| Компонент | Поддерживаемый вариант |
+| Component | Supported option |
 |---|---|
-| ОС | Windows 10/11 или Windows Server 2019/2022+ |
-| Компилятор | Visual Studio 2022 MSVC, x86 и x64 |
+| OS | Windows 10/11 or Windows Server 2019/2022+ |
+| Compiler | Visual Studio 2022 MSVC, x86 and x64 |
 | Build tools | CMake 3.25+, Ninja, PowerShell 7 |
-| Дополнительные gates | clang-cl 19+, PVS-Studio 7.29 |
+| Additional gates | clang-cl 19+, PVS-Studio 7.29 |
 
-Пути к toolchain можно передать параметрами скриптов. Зависимости libpq,
-OpenSSL, zlib и private SQLite закреплены build-манифестами и линкуются
-статически; release DLL не должна требовать их DLL.
+Toolchain paths can be supplied through script parameters. The libpq, OpenSSL,
+zlib, and private SQLite dependencies are pinned by build manifests and linked
+statically; the release DLL must not require their DLLs.
 
-## Обычная сборка
+## Regular build
 
 ```powershell
 pwsh -NoProfile -File scripts/build-stage1.ps1 -Preset msvc-x86-debug
 pwsh -NoProfile -File scripts/build-stage1.ps1 -Preset msvc-x64-release
 ```
 
-Готовая loadable extension находится в соответствующем `build/<preset>/`.
-Скрипт конфигурирует CMake, собирает все targets и запускает CTest. Network
-tests имеют status `skipped`, если runtime fixture не задана; mandatory release
-gate сам поднимает закреплённые локальные PostgreSQL 15–18.
+The resulting loadable extension is placed in the corresponding
+`build/<preset>/` directory. The script configures CMake, builds all targets,
+and runs CTest. Network tests report `skipped` when no runtime fixture is
+configured; the mandatory release gate starts pinned local PostgreSQL 15–18
+instances itself.
 
 ## Quality gates
 
@@ -38,12 +39,27 @@ pwsh -NoProfile -File scripts/ci/run-hardening.ps1
 pwsh -NoProfile -File scripts/ci/run-performance.ps1
 ```
 
-Generated build/evidence trees игнорируются Git и не входят в package.
-Release build выполняется отдельным clean reproducibility workflow, описанным
-в release manifest.
+Generated build and evidence trees are ignored by Git and are not included in
+the package. Release binaries are produced by the separate clean
+reproducibility workflow recorded in the release manifest.
+
+## Release package and dist
+
+The complete release workflow—two reproducible Win32/x64 builds, PE and package
+inspection, SBOM and provenance generation, and Windows 1.0 acceptance—runs
+with one command:
+
+```powershell
+pwsh -NoProfile -File scripts/package-windows.ps1
+```
+
+The verified archive is published as
+`dist/VirtualPostgreSQL-1.0.0-windows.zip`. Git permits only versioned
+`VirtualPostgreSQL-*.zip` files in `dist/`; intermediate staging directories
+and every other `dist/` file remain ignored.
 
 ## See Also
 
-- [Static analysis](static-analysis.md) — три независимых analyzer contour.
-- [Sanitizers](sanitizers.md) — поддерживаемые clang-cl конфигурации.
-- [Platform support](platform-support.md) — точная матрица Windows 1.0.
+- [Static analysis](static-analysis.md) — three independent analyzer contours.
+- [Sanitizers](sanitizers.md) — supported clang-cl configurations.
+- [Platform support](platform-support.md) — exact Windows 1.0 matrix.

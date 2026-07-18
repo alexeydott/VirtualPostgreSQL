@@ -185,6 +185,28 @@ static void vps_wincred_native_release(void *api_context,
 static const VpsWinCredApi vps_wincred_native_api = {
     vps_wincred_native_read, vps_wincred_native_release};
 
+static INIT_ONCE vps_wincred_public_once = INIT_ONCE_STATIC_INIT;
+static VpsAllocator vps_wincred_public_allocator;
+static VpsWinCredProviderContext vps_wincred_public_context;
+static int vps_wincred_public_ready;
+
+static BOOL CALLBACK vps_wincred_public_initialize(PINIT_ONCE once,
+                                                    PVOID parameter,
+                                                    PVOID *init_context)
+{
+    (void)once;
+    (void)parameter;
+    (void)init_context;
+    if (vps_allocator_system(&vps_wincred_public_allocator) != VPS_MEMORY_OK ||
+        vps_wincred_provider_init(&vps_wincred_public_context,
+                                  &vps_wincred_public_allocator,
+                                  vps_platform_current_operations(), NULL) !=
+            VPS_CREDENTIAL_REGISTRY_OK)
+        return FALSE;
+    vps_wincred_public_ready = 1;
+    return TRUE;
+}
+
 static void vps_wincred_log_locked(VpsWinCredProviderContext *context,
                                    const char *phase,
                                    VpsCredentialFields fields,
@@ -592,6 +614,18 @@ VpsCredentialRegistryResult vps_wincred_provider_make(
     provider->release = vps_wincred_release;
     provider->provider_context = context;
     return VPS_CREDENTIAL_REGISTRY_OK;
+}
+
+VpsCredentialRegistryResult vps_wincred_provider_public_make(
+    VpsCredentialProvider *provider)
+{
+    if (provider == NULL)
+        return VPS_CREDENTIAL_REGISTRY_INVALID_ARGUMENT;
+    if (!InitOnceExecuteOnce(&vps_wincred_public_once,
+                             vps_wincred_public_initialize, NULL, NULL) ||
+        !vps_wincred_public_ready)
+        return VPS_CREDENTIAL_REGISTRY_PLATFORM_ERROR;
+    return vps_wincred_provider_make(&vps_wincred_public_context, provider);
 }
 
 VpsCredentialRegistryResult vps_wincred_provider_cleanup(

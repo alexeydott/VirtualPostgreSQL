@@ -1,4 +1,5 @@
 #include "sqlite3.h"
+#include "virtualpostgresql/vps_api.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -10,6 +11,9 @@
 #endif
 
 typedef int32_t (*VpsHostCancelFn)(sqlite3 *database);
+typedef int (*VpsHostRegisterCredentialProviderFn)(
+    sqlite3 *database, const VpsCredentialProvider *provider);
+typedef int (*VpsHostWinCredProviderFn)(VpsCredentialProvider *provider);
 
 #if defined(VPS_DEBUG)
 static void vps_sqlite_log(void *context, int code, const char *message)
@@ -64,9 +68,10 @@ static int vps_exec_expect_failure(sqlite3 *database, const char *sql,
                   (result & 0xff) == expected_primary);
     if (!passed)
         (void)fprintf(stderr,
-                      "[host] level=error operation=expected-failure result=%d message=%.255s\n",
+                      "[host] level=error operation=expected-failure result=%d message=%.255s sql=%.255s\n",
                       result, error_message != NULL ? error_message
-                                                    : sqlite3_errmsg(database));
+                                                    : sqlite3_errmsg(database),
+                      sql != NULL ? sql : "unavailable");
     sqlite3_free(error_message);
     return passed;
 }
@@ -961,9 +966,14 @@ int main(int argument_count, char **arguments)
     const char *expected_architecture = sizeof(void *) == 4 ? "x86" : "x64";
     char *runtime_connstr = vps_runtime_connstr();
     VpsHostCancelFn cancel = NULL;
+    VpsHostRegisterCredentialProviderFn register_credential_provider = NULL;
+    VpsHostWinCredProviderFn wincred_provider = NULL;
+    VpsCredentialProvider provider;
 #if defined(_WIN32)
     HMODULE extension_module = NULL;
 #endif
+
+    (void)memset(&provider, 0, sizeof(provider));
 
     if (argument_count != 2) {
         (void)fprintf(stderr,
@@ -995,7 +1005,25 @@ int main(int argument_count, char **arguments)
         if (extension_module != NULL)
             cancel = (VpsHostCancelFn)(void *)GetProcAddress(
                 extension_module, "virtualpostgresql_cancel");
-        passed &= extension_module != NULL && cancel != NULL;
+        if (extension_module != NULL) {
+            register_credential_provider =
+                (VpsHostRegisterCredentialProviderFn)(void *)GetProcAddress(
+                    extension_module,
+                    "virtualpostgresql_register_credential_provider");
+            wincred_provider =
+                (VpsHostWinCredProviderFn)(void *)GetProcAddress(
+                    extension_module, "virtualpostgresql_wincred_provider");
+        }
+        passed &= extension_module != NULL && cancel != NULL &&
+                  register_credential_provider != NULL &&
+                  wincred_provider != NULL;
+        if (passed) {
+            passed &= wincred_provider(&provider) == SQLITE_OK &&
+                      provider.header.api_version == VPS_API_VERSION &&
+                      provider.resolve != NULL && provider.release != NULL;
+            passed &= register_credential_provider(database, &provider) ==
+                      SQLITE_OK;
+        }
     }
 #endif
     if (passed) {
@@ -1039,7 +1067,7 @@ int main(int argument_count, char **arguments)
             "CREATE VIEW temp.vps_metadata_unsafe AS SELECT * FROM "
             "virtualpostgresql_extensions('not-a-connection')");
         passed &= vps_exec_expect_failure(
-            database, "SELECT * FROM temp.vps_metadata_unsafe", SQLITE_AUTH);
+            database, "SELECT * FROM temp.vps_metadata_unsafe", SQLITE_ERROR);
         passed &= vps_exec_expect(database, "DROP VIEW temp.vps_metadata_unsafe");
         passed &= vps_exec_expect_failure(
             database,

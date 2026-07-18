@@ -1750,6 +1750,7 @@ if(BUILD_TESTING)
     )
     target_include_directories(vps_extension_host_test PRIVATE
       "${VPS_SQLITE_AMALGAMATION_DIR}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/include"
     )
     target_link_libraries(vps_extension_host_test PRIVATE vps_sqlite_host)
     if(WIN32)

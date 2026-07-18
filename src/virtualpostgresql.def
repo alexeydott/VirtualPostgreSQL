@@ -5,4 +5,6 @@ EXPORTS
     virtualpostgresql_credential_config_structure_size
     virtualpostgresql_credential_lease_structure_size
     virtualpostgresql_credential_provider_structure_size
+    virtualpostgresql_register_credential_provider
+    virtualpostgresql_wincred_provider
     virtualpostgresql_cancel

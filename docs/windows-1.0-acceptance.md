@@ -2,10 +2,10 @@
 
 # Windows 1.0 acceptance matrix
 
-Status `PASS` означает executable test либо deterministic inspection в указанном
-evidence path. Matrix checksum и source-tree hash создаются
-`scripts/release/verify-windows-1.0.ps1`; unchecked/duplicate/missing criterion
-делает gate failed.
+Status `PASS` means that an executable test or deterministic inspection exists
+at the specified evidence path. `scripts/release/verify-windows-1.0.ps1`
+produces the matrix checksum and source-tree hash; an unchecked, duplicate, or
+missing criterion fails the gate.
 
 | # | Criterion | Evidence | Status |
 |---:|---|---|---|

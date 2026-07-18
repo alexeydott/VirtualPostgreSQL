@@ -9,7 +9,8 @@
 
 # Build and release outputs.
 /build/
-/dist/
+/dist/*
+!/dist/VirtualPostgreSQL-*.zip
 /out/
 /cmake-build-*/
 **/CMakeFiles/

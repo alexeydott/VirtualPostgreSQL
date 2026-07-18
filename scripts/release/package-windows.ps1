@@ -114,11 +114,12 @@ foreach ($binary in @(@{Arch='x86';Path='bin\win32\virtualpostgresql.dll'},
 $versions = Get-Content -LiteralPath (Join-Path $rootPath 'deps\versions.json') -Raw | ConvertFrom-Json
 $components = [Collections.Generic.List[object]]::new()
 $components.Add([ordered]@{type='library'; name='VirtualPostgreSQL'; version=$Version;
-    licenses=@(@{license=@{id='MIT'}}); purl="pkg:generic/virtualpostgresql@$Version"})
+    licenses=@([ordered]@{license=[ordered]@{id='MIT'}}); purl="pkg:generic/virtualpostgresql@$Version"})
 foreach ($dependency in $versions.dependencies) {
     $components.Add([ordered]@{type='library'; name=$dependency.name;
-        version=$dependency.version; hashes=@(@{alg='SHA-256';content=$dependency.sha256});
-        licenses=@(@{license=@{name=$dependency.license}})})
+        version=$dependency.version;
+        hashes=@([ordered]@{alg='SHA-256';content=$dependency.sha256});
+        licenses=@([ordered]@{license=[ordered]@{name=$dependency.license}})})
 }
 $sbomSerialBytes = [Security.Cryptography.SHA256]::HashData(
     [Text.Encoding]::UTF8.GetBytes([string]$reproManifest.source_tree))
@@ -126,26 +127,33 @@ $sbomGuidBytes = [byte[]]::new(16)
 [Array]::Copy($sbomSerialBytes, $sbomGuidBytes, 16)
 $sbom = [ordered]@{
     bomFormat='CycloneDX'; specVersion='1.6'; serialNumber="urn:uuid:$([guid]::new($sbomGuidBytes))";
-    version=1; metadata=@{component=$components[0]}; components=@($components | Select-Object -Skip 1)
+    version=1; metadata=[ordered]@{component=$components[0]};
+    components=@($components | Select-Object -Skip 1)
 }
 $sbom | ConvertTo-Json -Depth 10 | Set-Content `
     -LiteralPath (Join-Path $stage 'sbom\cyclonedx.json') -Encoding utf8
 
 $subjects = @('bin\win32\virtualpostgresql.dll','bin\x64\virtualpostgresql.dll') | ForEach-Object {
     $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage $_)).Hash.ToLowerInvariant()
-    @{name=$_.Replace('\','/'); digest=@{sha256=$digest}}
+    [ordered]@{name=$_.Replace('\','/'); digest=[ordered]@{sha256=$digest}}
 }
 $provenance = [ordered]@{
     _type='https://in-toto.io/Statement/v1'; subject=$subjects;
     predicateType='https://slsa.dev/provenance/v1';
     predicate=[ordered]@{
-        buildDefinition=@{buildType='https://virtualpostgresql.dev/build/windows-1.0';
-            externalParameters=@{architectures=@('x86','x64');configuration='Release'};
-            internalParameters=@{reproducible=$true};
-            resolvedDependencies=@(@{uri='git+local:source';digest=@{gitTree=$reproManifest.source_tree}},
-                @{uri='file:deps/versions.json';digest=@{sha256=$reproManifest.dependency_manifest_sha256}})};
-        runDetails=@{builder=@{id='https://virtualpostgresql.dev/builders/msvc-2022'};
-            metadata=@{invocationId=$reproManifest.source_tree}}
+        buildDefinition=[ordered]@{
+            buildType='https://virtualpostgresql.dev/build/windows-1.0';
+            externalParameters=[ordered]@{architectures=@('x86','x64');configuration='Release'};
+            internalParameters=[ordered]@{reproducible=$true};
+            resolvedDependencies=@(
+                [ordered]@{uri='git+local:source';digest=[ordered]@{gitTree=$reproManifest.source_tree}},
+                [ordered]@{uri='file:deps/versions.json';digest=[ordered]@{sha256=$reproManifest.dependency_manifest_sha256}}
+            )
+        };
+        runDetails=[ordered]@{
+            builder=[ordered]@{id='https://virtualpostgresql.dev/builders/msvc-2022'};
+            metadata=[ordered]@{invocationId=$reproManifest.source_tree}
+        }
     }
 }
 $provenance | ConvertTo-Json -Depth 12 | Set-Content `

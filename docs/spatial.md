@@ -1,28 +1,29 @@
 [← Previous: Transactions](transactions-savepoints.md) · [Back to README](../README.md) · [Next: Metadata and cache →](metadata-functions-cache.md)
 
-# PostGIS и spatial values
+# PostGIS and spatial values
 
-PostGIS поддержка optional и определяется только через PostgreSQL catalogs.
-Extension schema может быть нестандартной; вызовы spatial functions всегда
-schema-qualified по доверенному результату discovery.
+PostGIS support is optional and is discovered only through PostgreSQL catalogs.
+The extension schema may be non-default; spatial function calls are always
+schema-qualified using the trusted discovery result.
 
-| Режим | SQLite representation | SRID |
+| Mode | SQLite representation | SRID |
 |---|---|---|
-| `geometry=wkt` | TEXT WKT | typmod или explicit `srid=` |
-| `geometry=wkb` | BLOB WKB | typmod или explicit `srid=` |
-| `geometry=ewkt` | TEXT EWKT | embedded/typmod должны согласоваться |
-| `geometry=ewkb` | BLOB EWKB | embedded/typmod должны согласоваться |
+| `geometry=wkt` | TEXT WKT | typmod or explicit `srid=` |
+| `geometry=wkb` | BLOB WKB | typmod or explicit `srid=` |
+| `geometry=ewkt` | TEXT EWKT | embedded and typmod SRIDs must agree |
+| `geometry=ewkb` | BLOB EWKB | embedded and typmod SRIDs must agree |
 
-Поддерживаются `geometry` и `geography`, EMPTY и NULL остаются различными.
-Structural validators проверяют endian/type/dimensions/SRID/count/nesting,
-finite coordinates и exact payload length до server send. Extension не меняет
-ось координат, не выполняет `ST_Transform` и не подменяет SRID.
+Both `geometry` and `geography` are supported, and EMPTY remains distinct from
+NULL. Structural validators check endianness, type, dimensions, SRID, counts,
+nesting, finite coordinates, and exact payload length before sending data to
+the server. The extension does not swap coordinate axes, call `ST_Transform`,
+or substitute an SRID.
 
-SpatiaLite output в Windows 1.0 явно unavailable. Запись доступна только для
-writable table source с согласованными catalog capabilities; query source,
-view, materialized view и foreign table остаются read-only.
+SpatiaLite output is explicitly unavailable in Windows 1.0. Writes are allowed
+only for a writable table source with compatible catalog capabilities; query
+sources, views, materialized views, and foreign tables remain read-only.
 
-Примеры находятся в [examples/spatial.sql](../examples/spatial.sql).
+Examples are available in [examples/spatial.sql](../examples/spatial.sql).
 
 ## See Also
 

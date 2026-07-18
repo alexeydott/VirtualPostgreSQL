@@ -47,10 +47,6 @@ typedef struct VpsTable {
     sqlite3 *database;
     VpsAllocator allocator;
     VpsLogger logger;
-#if defined(_WIN32)
-    VpsCredentialRegistry credential_registry;
-    VpsWinCredProviderContext wincred;
-#endif
     VpsParsedArguments arguments;
     VpsConnectionConfig connection_config;
     VpsConnectionIdentity identity;
@@ -98,8 +94,6 @@ typedef struct VpsTable {
 #endif
     int initialized_arguments;
 #if defined(_WIN32)
-    int initialized_registry;
-    int initialized_wincred;
 #endif
     int initialized_config;
     int initialized_identity;
@@ -227,6 +221,48 @@ VpsModuleContext *vps_module_context_create(sqlite3 *database)
         return NULL;
     }
     context->initialized_cancel_registry = 1;
+#if defined(_WIN32)
+    {
+        VpsCredentialProvider provider;
+        if (vps_allocator_system(&context->credential_allocator) !=
+                VPS_MEMORY_OK ||
+            vps_credential_registry_init(
+                &context->credential_registry,
+                vps_platform_current_operations(), NULL) !=
+                VPS_CREDENTIAL_REGISTRY_OK) {
+            (void)vps_cancel_registry_cleanup(&context->cancel_registry);
+            vps_transaction_cleanup(&context->transaction);
+            sqlite3_free(context);
+            return NULL;
+        }
+        context->initialized_credential_registry = 1;
+        if (vps_wincred_provider_init(
+                &context->wincred, &context->credential_allocator,
+                vps_platform_current_operations(), NULL) !=
+                VPS_CREDENTIAL_REGISTRY_OK) {
+            (void)vps_credential_registry_cleanup(
+                &context->credential_registry);
+            (void)vps_cancel_registry_cleanup(&context->cancel_registry);
+            vps_transaction_cleanup(&context->transaction);
+            sqlite3_free(context);
+            return NULL;
+        }
+        context->initialized_wincred = 1;
+        if (vps_wincred_provider_make(&context->wincred, &provider) !=
+                VPS_CREDENTIAL_REGISTRY_OK ||
+            vps_credential_registry_register(
+                &context->credential_registry, UINT64_C(1), &provider) !=
+                VPS_CREDENTIAL_REGISTRY_OK) {
+            (void)vps_wincred_provider_cleanup(&context->wincred);
+            (void)vps_credential_registry_cleanup(
+                &context->credential_registry);
+            (void)vps_cancel_registry_cleanup(&context->cancel_registry);
+            vps_transaction_cleanup(&context->transaction);
+            sqlite3_free(context);
+            return NULL;
+        }
+    }
+#endif
     return context;
 }
 
@@ -241,6 +277,13 @@ void vps_module_context_destroy(void *opaque)
     context->transaction_connection = NULL;
     if (context->initialized_transaction)
         vps_transaction_cleanup(&context->transaction);
+#if defined(_WIN32)
+    if (context->initialized_credential_registry)
+        (void)vps_credential_registry_cleanup(
+            &context->credential_registry);
+    if (context->initialized_wincred)
+        (void)vps_wincred_provider_cleanup(&context->wincred);
+#endif
     if (context->initialized_cancel_registry)
         (void)vps_cancel_registry_cleanup(&context->cancel_registry);
     sqlite3_free(context);
@@ -802,14 +845,6 @@ static int vps_table_cleanup(VpsTable *table)
     if (table->initialized_config &&
         vps_connection_config_cleanup(&table->connection_config) !=
             VPS_CONNECTION_STRING_OK) clean = 0;
-#if defined(_WIN32)
-    if (table->initialized_registry &&
-        vps_credential_registry_cleanup(&table->credential_registry) !=
-            VPS_CREDENTIAL_REGISTRY_OK) clean = 0;
-    if (table->initialized_wincred &&
-        vps_wincred_provider_cleanup(&table->wincred) !=
-            VPS_CREDENTIAL_REGISTRY_OK) clean = 0;
-#endif
     if (table->initialized_arguments &&
         vps_arguments_reset(&table->arguments) != VPS_ARGUMENTS_OK) clean = 0;
     sqlite3_free(table->shadow_schema);
@@ -923,28 +958,11 @@ static int vps_table_initialize_runtime(VpsTable *table,
     table->initialized_config = 1;
     (void)memset(&resolve_options, 0, sizeof(resolve_options));
 #if defined(_WIN32)
-    {
-        VpsCredentialProvider provider;
-        if (vps_credential_registry_init(
-                &table->credential_registry,
-                vps_platform_current_operations(), &table->logger) !=
-                VPS_CREDENTIAL_REGISTRY_OK)
-            return SQLITE_ERROR;
-        table->initialized_registry = 1;
-        if (vps_wincred_provider_init(
-                &table->wincred, &table->allocator,
-                vps_platform_current_operations(), &table->logger) !=
-                VPS_CREDENTIAL_REGISTRY_OK)
-            return SQLITE_ERROR;
-        table->initialized_wincred = 1;
-        if (vps_wincred_provider_make(&table->wincred, &provider) !=
-                VPS_CREDENTIAL_REGISTRY_OK ||
-            vps_credential_registry_register(
-                &table->credential_registry, UINT64_C(1), &provider) !=
-                VPS_CREDENTIAL_REGISTRY_OK)
-            return SQLITE_ERROR;
-        resolve_options.credential_registry = &table->credential_registry;
-    }
+    if (table->module_context == NULL ||
+        !table->module_context->initialized_credential_registry)
+        return SQLITE_ERROR;
+    resolve_options.credential_registry =
+        &table->module_context->credential_registry;
 #endif
     parser.context = NULL;
     parser.parse = vps_libpq_client_conninfo_parse;

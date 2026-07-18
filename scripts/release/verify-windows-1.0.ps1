@@ -43,7 +43,7 @@ $expectedExports = @(Get-Content -LiteralPath (Join-Path $rootPath 'scripts\ci\e
     ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
 $definitionExports = @(Get-Content -LiteralPath (Join-Path $rootPath 'src\virtualpostgresql.def') |
     Select-Object -Skip 2 | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
-if ($expectedExports.Count -ne 6 -or
+if ($expectedExports.Count -ne 8 -or
     @(Compare-Object $expectedExports $definitionExports).Count -ne 0) {
     throw '[acceptance] public export freeze mismatch'
 }
@@ -91,4 +91,4 @@ New-Item -ItemType Directory -Path $evidence -Force | Out-Null
 $attestation | ConvertTo-Json -Depth 4 | Set-Content `
     -LiteralPath (Join-Path $evidence 'windows-1.0-attestation.json') -Encoding utf8
 Write-VpsCiEvent -Gate $gate -Level info -Status passed `
-    -Detail "api=1.0.0,abi_architectures=2,exports=6,criteria=132,passed=132,failed=0,matrix_sha256=$matrixHash,source_tree=$($reproManifest.source_tree)"
+    -Detail "api=1.0.0,abi_architectures=2,exports=8,criteria=132,passed=132,failed=0,matrix_sha256=$matrixHash,source_tree=$($reproManifest.source_tree)"

@@ -2,43 +2,91 @@
 
 # Query sources
 
-Query source отображает результат одного `SELECT` или `WITH ... SELECT` как read-only virtual table. Inline query проходит bounded lexical scanner, затем PostgreSQL prepare/describe внешнего wrapper. В production предпочтителен versioned `query_profile`, разрешаемый host/protected-config/environment/named-registry provider.
+A query source maps the result of one `SELECT` or `WITH ... SELECT` statement
+as a read-only virtual table. An inline query passes a bounded lexical scanner,
+then PostgreSQL prepare/describe through an outer wrapper. Production
+deployments should prefer a versioned `query_profile` resolved by a host,
+protected-configuration, environment, or named-registry provider.
 
 ## Validation boundary
 
-До выполнения extension:
+Before execution, the extension:
 
-1. проверяет UTF-8, NUL, размер, quotes/comments/dollar quotes и один statement;
-2. отклоняет unresolved `$n`, DML/DDL, data-modifying CTE, `COPY`, `CALL`, `DO`, transaction/session control, `LISTEN`/`NOTIFY`, locking SELECT и `SELECT INTO`;
-3. подготавливает и описывает без выполнения `SELECT * FROM (<query>) AS vps_validation LIMIT 0`;
-4. требует непустые уникальные result aliases с ASCII case-insensitive canonical comparison;
-5. разрешает `key_columns` и `query_indexes` только по canonical result columns;
-6. выполняет scan внутри `BEGIN READ ONLY` с transaction-local controlled `search_path`, `statement_timeout`, `lock_timeout` и extension-side row/byte/deadline limits;
-7. завершает boundary только `COMMIT` или `ROLLBACK`.
+1. validates UTF-8, embedded NUL, size, quotes, comments, dollar quotes, and the
+   single-statement boundary;
+2. rejects unresolved `$n`, DML/DDL, data-modifying CTEs, `COPY`, `CALL`, `DO`,
+   transaction/session control, `LISTEN`/`NOTIFY`, locking SELECT, and
+   `SELECT INTO`;
+3. prepares and describes, without executing,
+   `SELECT * FROM (<query>) AS vps_validation LIMIT 0`;
+4. requires non-empty unique result aliases using ASCII case-insensitive
+   canonical comparison;
+5. permits `key_columns` and `query_indexes` only over canonical result columns;
+6. scans inside `BEGIN READ ONLY` with transaction-local controlled
+   `search_path`, `statement_timeout`, `lock_timeout`, and extension-side
+   row/byte/deadline limits;
+7. closes the boundary only with `COMMIT` or `ROLLBACK`.
 
-Inner query не переписывается. Будущий planner добавляет predicates, order и limits только во внешний execution wrapper.
+The inner query is never rewritten. The planner adds predicates, ordering, and
+limits only to the outer execution wrapper.
 
 ## Security limitation
 
-Query validation — defense in depth, а не PostgreSQL sandbox. Разрешённый `SELECT` способен вызвать функцию с внешними side effects, которые read-only transaction не отменяет. Production configuration должна использовать отдельную least-privilege role, schema-qualified object names, controlled `search_path`, отозванные unnecessary `EXECUTE` privileges и approved query profiles. Inline query требует явного предупреждения вызывающему приложению.
+Query validation is defense in depth, not a PostgreSQL sandbox. An accepted
+`SELECT` can call a function with external side effects that a read-only
+transaction cannot undo. Production configuration must use a dedicated
+least-privilege role, schema-qualified object names, a controlled `search_path`,
+revoked unnecessary `EXECUTE` privileges, and approved query profiles. The
+calling application must explicitly warn users when inline queries are enabled.
 
-Raw query, profile content и values не входят в обычные logs/errors/fingerprints. Debug SQL разрешён только существующим compile-time `VPS_DEBUG` и runtime `debug` gate; Release/RelWithDebInfo отклоняют это поле.
+Raw query text, profile content, and values never enter normal logs, errors, or
+fingerprints. Debug SQL is allowed only by the existing compile-time
+`VPS_DEBUG` and runtime `debug` gate; Release and RelWithDebInfo builds reject
+the field.
 
 ## Result identity and indexes
 
-`key_columns` объявляет validated logical identity только для read-only planning; query source не получает DML. `query_indexes` использует grammar `name=column[,column...][;...]`, сохраняет порядок columns и не заявляет remote/unique index. Unique planning может опираться только на validated `key_columns`.
+`key_columns` declares a validated logical identity for read-only planning
+only; a query source never gains DML support. `query_indexes` uses the grammar
+`name=column[,column...][;...]`, preserves column order, and does not claim a
+remote or unique index. Unique planning may rely only on validated
+`key_columns`.
 
-Query fingerprint включает normalized query hash/profile version, ordered aliases and OID/typmod/origin/collation metadata, spatial policy, keys, query indexes, materialization mode и wrapper/codec versions. Изменение любого contract-relevant component считается metadata drift.
+The query fingerprint includes the normalized query hash/profile version,
+ordered aliases and OID/typmod/origin/collation metadata, spatial policy, keys,
+query indexes, materialization mode, and wrapper/codec versions. A change to
+any contract-relevant component is metadata drift.
 
 ## Query materialization
 
-`query_materialization=off|memory|temp` управляет lazy snapshot только для `source=query`; default `off` сохраняет single-row remote streaming. `memory` строит immutable private in-memory SQLite database, `temp` — private database в `%LOCALAPPDATA%\VirtualPostgreSQL\Temp` с owner-only ACL, in-memory rollback journal и delete-on-close cleanup. Host SQLite handles и allocators не передаются private SQLite.
+`query_materialization=off|memory|temp` controls a lazy snapshot only for
+`source=query`; the default `off` retains single-row remote streaming. `memory`
+builds an immutable private in-memory SQLite database. `temp` builds a private
+database in `%LOCALAPPDATA%\VirtualPostgreSQL\Temp` with an owner-only access
+control list (ACL), an in-memory rollback journal, and delete-on-close cleanup.
+Host SQLite handles and allocators are never passed to private SQLite.
 
-Первый scan полностью выполняет validated source query один раз, переносит уже декодированные portable SQLite values и строит non-unique physical indexes из `query_indexes`. Candidate становится видимым только после terminal remote result, всех limit checks, local index build и private commit. Failed/late-error/OOM/temp/index build очищается без partial publish; следующий caller может безопасно повторить build. Published generation immutable, не имеет TTL, automatic refresh или host-shadow rows.
+The first scan executes the validated source query exactly once, transfers
+already-decoded portable SQLite values, and builds non-unique physical indexes
+from `query_indexes`. The candidate becomes visible only after the terminal
+remote result, all limit checks, local index construction, and private commit.
+A failed, late-error, out-of-memory, temporary-file, or index build is cleaned
+up without partial publication; the next caller may safely retry the build. A
+published generation is immutable and has no TTL, automatic refresh, or host
+shadow rows.
 
-Subsequent cursors получают refcounted lease и выполняют exact predicates, projection, compatible ordering и consumed limit/offset локально. `query_indexes` никогда не создаёт unique claim: `SQLITE_INDEX_SCAN_UNIQUE` по-прежнему допускается только для полностью constrained validated `key_columns`. Для обновления snapshot virtual table нужно disconnect/reconnect или recreate; скрытого refresh нет.
+Subsequent cursors obtain a reference-counted lease and evaluate exact
+predicates, projection, compatible ordering, and consumed limit/offset locally.
+`query_indexes` never creates a uniqueness claim: `SQLITE_INDEX_SCAN_UNIQUE`
+remains valid only for fully constrained, validated `key_columns`. Refreshing a
+snapshot requires disconnect/reconnect or virtual-table recreation; there is no
+hidden refresh.
 
-Stage gate измеряет минимум 3 samples по 100 probes: remote executions должны сокращаться с `N` до `1`, physical local index подтверждается private `EXPLAIN QUERY PLAN`, а p50 должен улучшаться минимум на 10%. Bulk/equivalence/performance contour выполняется на локальном no-SSL стенде; quota-limited TLS stand не используется для bulk data.
+The stage gate measures at least three samples of 100 probes. Remote executions
+must fall from `N` to `1`, the physical local index is confirmed through private
+`EXPLAIN QUERY PLAN`, and p50 must improve by at least 10%. Bulk, equivalence,
+and performance contours run on the local no-SSL stand; the quota-limited TLS
+stand is never used for bulk data.
 
 ## See Also
 

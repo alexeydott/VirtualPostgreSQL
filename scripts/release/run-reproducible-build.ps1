@@ -35,6 +35,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw '[reproducibility] temporary index init failed' }
     & git -C $rootPath add -A -- .
     if ($LASTEXITCODE -ne 0) { throw '[reproducibility] source snapshot failed' }
+    # Versioned dist ZIPs are tracked release outputs, never source inputs.
+    # Remove them from the temporary index to avoid recursive provenance.
+    & git -C $rootPath rm -r --cached --ignore-unmatch -- dist
+    if ($LASTEXITCODE -ne 0) { throw '[reproducibility] dist exclusion failed' }
     $sourceTree = (& git -C $rootPath write-tree).Trim()
     if ($LASTEXITCODE -ne 0 -or $sourceTree -notmatch '^[0-9a-f]{40}$') {
         throw '[reproducibility] source tree hash failed'

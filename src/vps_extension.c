@@ -28,6 +28,44 @@ int32_t VPS_CALL virtualpostgresql_cancel(sqlite3 *database)
                : VPS_CANCEL_ERROR;
 }
 
+int VPS_CALL virtualpostgresql_register_credential_provider(
+    sqlite3 *database, const VpsCredentialProvider *provider)
+{
+    VpsModuleContext *context;
+    if (database == NULL || provider == NULL) return SQLITE_MISUSE;
+    context = (VpsModuleContext *)sqlite3_get_clientdata(
+        database, VPS_MODULE_CLIENTDATA_KEY);
+    if (context == NULL || context->closing) return SQLITE_NOTFOUND;
+#if defined(_WIN32)
+    VpsCredentialRegistryResult result;
+    if (!context->initialized_credential_registry) return SQLITE_NOTFOUND;
+    result = vps_credential_registry_register(
+        &context->credential_registry, UINT64_C(2), provider);
+    if (result == VPS_CREDENTIAL_REGISTRY_OK) return SQLITE_OK;
+    if (result == VPS_CREDENTIAL_REGISTRY_REPLACEMENT_FORBIDDEN ||
+        result == VPS_CREDENTIAL_REGISTRY_BUSY)
+        return SQLITE_BUSY;
+    if (result == VPS_CREDENTIAL_REGISTRY_INVALID_ARGUMENT ||
+        result == VPS_CREDENTIAL_REGISTRY_ABI_INCOMPATIBLE)
+        return SQLITE_MISUSE;
+    return SQLITE_ERROR;
+#else
+    return SQLITE_NOTFOUND;
+#endif
+}
+
+#if defined(_WIN32)
+int VPS_CALL virtualpostgresql_wincred_provider(
+    VpsCredentialProvider *provider)
+{
+    if (provider == NULL) return SQLITE_MISUSE;
+    return vps_wincred_provider_public_make(provider) ==
+                   VPS_CREDENTIAL_REGISTRY_OK
+               ? SQLITE_OK
+               : SQLITE_ERROR;
+}
+#endif
+
 static void vps_version_sql(sqlite3_context *context,
                             int argument_count,
                             sqlite3_value **arguments)

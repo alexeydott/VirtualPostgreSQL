@@ -37,6 +37,7 @@ if ($readme.Count -ge 150 -or ($readme -join "`n") -notmatch '## Quick start' -o
 }
 Get-ChildItem -LiteralPath (Join-Path $rootPath 'docs') -Filter '*.md' -File |
     ForEach-Object { $files.Add($_) }
+$docsFiles = @($files)
 $files.Add((Get-Item -LiteralPath (Join-Path $rootPath 'README.md')))
 $files.Add((Get-Item -LiteralPath (Join-Path $rootPath 'examples\README.md')))
 $linkCount = 0
@@ -74,6 +75,31 @@ for ($index = 0; $index -lt $navigationOrder.Count; ++$index) {
         throw "[docs] next navigation mismatch: $($navigationOrder[$index])"
     }
 }
+foreach ($file in $docsFiles) {
+    if ((Get-Content -LiteralPath $file.FullName -Raw) -match '[А-Яа-яЁё]') {
+        throw "[docs] non-English Cyrillic text found: $($file.Name)"
+    }
+}
+$publicHeaderPath = Join-Path $rootPath 'include\virtualpostgresql\vps_api.h'
+$publicHeader = Get-Content -LiteralPath $publicHeaderPath
+$publicDeclarationCount = 0
+for ($index = 0; $index -lt $publicHeader.Count; ++$index) {
+    $line = $publicHeader[$index]
+    $isPublicType = $line -match '^typedef (?:uint64_t VpsCredentialFields;|struct Vps(?:AbiHeader|CredentialConfig|CredentialLease|CredentialProvider)\s*\{|(?:int32_t|void)\(VPS_CALL \*VpsCredential(?:Resolve|Release)Fn\)\()'
+    $isPublicFunction = $line -match '^VPS_API\s+'
+    if (-not $isPublicType -and -not $isPublicFunction) { continue }
+    ++$publicDeclarationCount
+    $previous = $index - 1
+    while ($previous -ge 0 -and $publicHeader[$previous].Trim().Length -eq 0) {
+        --$previous
+    }
+    if ($previous -lt 0 -or $publicHeader[$previous].Trim() -notmatch '\*/$') {
+        throw "[docs] public API declaration lacks an adjacent comment: line=$($index + 1)"
+    }
+}
+if ($publicDeclarationCount -ne 14) {
+    throw "[docs] public API declaration inventory changed: count=$publicDeclarationCount"
+}
 $allText = @($files | ForEach-Object {
     Get-Content -LiteralPath $_.FullName -Raw
 }) -join "`n"
@@ -85,4 +111,4 @@ if ($allText -notmatch 'stock\s+Android\s+SQLite' -or
     throw '[docs] Android host SQLite caveat missing'
 }
 Write-VpsCiEvent -Gate 'docs' -Level info -Status passed `
-    -Detail "files=$($files.Count),links=$linkCount,broken=0,navigation_pages=$($navigationOrder.Count),readme_lines=$($readme.Count),required_examples=4,android_caveat=present"
+    -Detail "files=$($files.Count),links=$linkCount,broken=0,navigation_pages=$($navigationOrder.Count),english_docs=$($docsFiles.Count),public_api_comments=$publicDeclarationCount,readme_lines=$($readme.Count),required_examples=4,android_caveat=present"
