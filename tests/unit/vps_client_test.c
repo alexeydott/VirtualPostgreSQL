@@ -41,7 +41,7 @@ typedef struct FakeBackend {
 static const char test_query[] = "SELECT 1";
 static const VpsClientStatementSpec test_statement_spec = {
     test_query, sizeof(test_query) - 1U, NULL, 0U, NULL, 0U,
-    UINT64_C(1000), 0, 0};
+    UINT64_C(1000), 0, 0, 0};
 
 typedef struct TestLogCapture {
     size_t event_count;
@@ -232,6 +232,25 @@ static VpsClientStatus fake_statement_metadata(
     return VPS_CLIENT_OK;
 }
 
+static VpsClientStatus fake_statement_result_field(
+    void *context, const void *handle, size_t index,
+    VpsClientResultFieldMetadata *field, VpsError *error)
+{
+    static const char name[] = "value";
+    FakeBackend *backend = (FakeBackend *)context;
+    (void)error;
+    if (handle != &backend->statement_token || index != 0U || field == NULL) {
+        return VPS_CLIENT_BACKEND_ERROR;
+    }
+    (void)memset(field, 0, sizeof(*field));
+    field->name = name;
+    field->name_length = sizeof(name) - 1U;
+    field->type_oid = 23U;
+    field->type_modifier = -1;
+    field->format = VPS_CLIENT_VALUE_TEXT;
+    return VPS_CLIENT_OK;
+}
+
 static VpsClientStatus fake_statement_row(
     void *context, const void *handle, size_t *column_count, VpsError *error)
 {
@@ -288,6 +307,7 @@ static VpsClientOperations fake_operations(uint64_t capabilities)
     operations.statement_poll = fake_statement_poll;
     operations.statement_wait = fake_statement_wait;
     operations.statement_metadata = fake_statement_metadata;
+    operations.statement_result_field = fake_statement_result_field;
     operations.statement_row = fake_statement_row;
     operations.statement_column = fake_statement_column;
     operations.statement_row_release = fake_statement_row_release;

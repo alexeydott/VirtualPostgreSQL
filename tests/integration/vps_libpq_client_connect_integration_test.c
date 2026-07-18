@@ -2,6 +2,8 @@
 #include "vps_libpq_client_metadata.h"
 #include "vps_connection_pool.h"
 #include "vps_schema_fingerprint.h"
+#include "vps_query_boundary.h"
+#include "vps_query_validation.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -833,12 +835,18 @@ int main(void)
     VpsClientResultFieldExpectation result_field;
     VpsClientStatementSpec statement_spec;
     VpsClientStatementMetadata statement_metadata;
+    VpsQueryValidation query_validation;
+    VpsQueryValidation rejection_validation;
+    VpsQueryDescribeResult query_describe;
     VpsError error;
     VpsClientStatus connect_status = VPS_CLIENT_INVALID_STATE;
     VpsClientStatus statement_status = VPS_CLIENT_INVALID_STATE;
     VpsClientStatus health_status = VPS_CLIENT_INVALID_STATE;
     VpsClientStatus metadata_status = VPS_CLIENT_INVALID_STATE;
     VpsClientStatus cancel_status = VPS_CLIENT_INVALID_STATE;
+    VpsClientStatus query_validation_status = VPS_CLIENT_INVALID_STATE;
+    VpsClientStatus query_boundary_status = VPS_CLIENT_INVALID_STATE;
+    VpsClientStatus query_rejection_status = VPS_CLIENT_INVALID_STATE;
     VpsClientStatus fixture_status = VPS_CLIENT_OK;
     VpsClientStatus network_status = VPS_CLIENT_OK;
     VpsClientPollResult cancel_poll;
@@ -853,6 +861,9 @@ int main(void)
     int error_initialized = 0;
     int adapter_initialized = 0;
     int client_initialized = 0;
+    int query_validation_initialized = 0;
+    int rejection_validation_initialized = 0;
+    int query_describe_initialized = 0;
     int passed = 0;
     int fixture_requested = 0;
     int network_requested = 0;
@@ -1025,6 +1036,50 @@ int main(void)
             statement_status = vps_client_statement_close(&statement);
         }
         if (statement_status == VPS_CLIENT_OK) {
+            static const char validation_query[] =
+                "WITH control AS (SELECT 1::pg_catalog.int4 AS Id, "
+                "'control'::pg_catalog.text AS Label) "
+                "SELECT Id, Label FROM control";
+            if (vps_query_validation_init(
+                    &query_validation, &allocator, validation_query,
+                    sizeof(validation_query) - 1U, 5000U, &logger) ==
+                    VPS_QUERY_VALIDATION_OK) {
+                query_validation_initialized = 1;
+                query_validation_status = vps_client_statement_open(
+                    connection,
+                    vps_query_validation_statement_spec(&query_validation),
+                    &statement, &error);
+            }
+            if (query_validation_status == VPS_CLIENT_OK) {
+                query_validation_status = vps_client_statement_start(
+                    statement, VPS_CLIENT_OPERATION_PREPARE, &error);
+            }
+            if (query_validation_status == VPS_CLIENT_OK) {
+                query_validation_status = vps_async_drive_statement(
+                    statement, &error);
+            }
+            if (query_validation_status == VPS_CLIENT_OK &&
+                vps_query_describe_result_init(&query_describe, &allocator) ==
+                    VPS_QUERY_VALIDATION_OK) {
+                query_describe_initialized = 1;
+                if (vps_query_validation_collect(
+                        statement, &query_describe, &error) !=
+                        VPS_QUERY_VALIDATION_OK ||
+                    query_describe.field_count != 2U ||
+                    strcmp(query_describe.fields[0].name, "id") != 0 ||
+                    query_describe.fields[0].type_oid != 23U ||
+                    strcmp(query_describe.fields[1].name, "label") != 0 ||
+                    query_describe.fields[1].type_oid != 25U) {
+                    query_validation_status = VPS_CLIENT_BACKEND_ERROR;
+                }
+            }
+            if (statement != NULL &&
+                vps_client_statement_close(&statement) != VPS_CLIENT_OK) {
+                query_validation_status = VPS_CLIENT_BACKEND_ERROR;
+            }
+        }
+        if (statement_status == VPS_CLIENT_OK &&
+            query_validation_status == VPS_CLIENT_OK) {
             static const char cancel_query[] =
                 "SELECT pg_catalog.pg_sleep(10)";
             result_field.type_oid = 2278U;
@@ -1083,6 +1138,77 @@ int main(void)
             health_status = VPS_CLIENT_OK;
         }
     }
+    if (!network_requested && health_status == VPS_CLIENT_OK &&
+        vps_connection_pool_acquire(pool, &pool_key, 10000U, NULL, NULL,
+                                    &lease) == VPS_CONNECTION_POOL_OK) {
+        connection = (VpsClientConnection *)lease.connection;
+        query_boundary_status = vps_async_execute_command(
+            connection, VPS_QUERY_BOUNDARY_BEGIN_SQL, &error);
+        if (query_boundary_status == VPS_CLIENT_OK) {
+            query_boundary_status = vps_async_execute_command(
+                connection,
+                "CREATE TEMP TABLE vps_read_only_boundary_probe(id int)",
+                &error);
+            if (query_boundary_status == VPS_CLIENT_BACKEND_ERROR &&
+                strcmp(error.sqlstate, "25006") == 0) {
+                query_boundary_status = VPS_CLIENT_OK;
+            } else {
+                query_boundary_status = VPS_CLIENT_BACKEND_ERROR;
+            }
+        }
+        if (vps_connection_lease_release(
+                &lease, VPS_CONNECTION_LEASE_DIRTY) !=
+            VPS_CONNECTION_POOL_OK) {
+            query_boundary_status = VPS_CLIENT_BACKEND_ERROR;
+        }
+        connection = NULL;
+        vps_error_reset(&error);
+    } else if (network_requested) {
+        query_boundary_status = VPS_CLIENT_OK;
+    }
+    if (!network_requested && query_boundary_status == VPS_CLIENT_OK &&
+        vps_connection_pool_acquire(pool, &pool_key, 10000U, NULL, NULL,
+                                    &lease) == VPS_CONNECTION_POOL_OK) {
+        static const char invalid_query[] = "SELECT FROM";
+        connection = (VpsClientConnection *)lease.connection;
+        if (vps_query_validation_init(
+                &rejection_validation, &allocator, invalid_query,
+                sizeof(invalid_query) - 1U, 5000U, &logger) ==
+            VPS_QUERY_VALIDATION_OK) {
+            rejection_validation_initialized = 1;
+            query_rejection_status = vps_client_statement_open(
+                connection,
+                vps_query_validation_statement_spec(&rejection_validation),
+                &statement, &error);
+        }
+        if (query_rejection_status == VPS_CLIENT_OK) {
+            query_rejection_status = vps_client_statement_start(
+                statement, VPS_CLIENT_OPERATION_PREPARE, &error);
+        }
+        if (query_rejection_status == VPS_CLIENT_OK) {
+            query_rejection_status = vps_async_drive_statement(statement,
+                                                                &error);
+        }
+        if (query_rejection_status == VPS_CLIENT_BACKEND_ERROR &&
+            strcmp(error.sqlstate, "42601") == 0) {
+            query_rejection_status = VPS_CLIENT_OK;
+        } else {
+            query_rejection_status = VPS_CLIENT_BACKEND_ERROR;
+        }
+        if (statement != NULL &&
+            vps_client_statement_close(&statement) != VPS_CLIENT_OK) {
+            query_rejection_status = VPS_CLIENT_BACKEND_ERROR;
+        }
+        if (vps_connection_lease_release(
+                &lease, VPS_CONNECTION_LEASE_DIRTY) !=
+            VPS_CONNECTION_POOL_OK) {
+            query_rejection_status = VPS_CLIENT_BACKEND_ERROR;
+        }
+        connection = NULL;
+        vps_error_reset(&error);
+    } else if (network_requested) {
+        query_rejection_status = VPS_CLIENT_OK;
+    }
     if (network_requested && health_status == VPS_CLIENT_OK) {
         network_status = VPS_CLIENT_BACKEND_ERROR;
         if (vps_connection_pool_acquire(pool, &pool_key, 10000U, NULL, NULL,
@@ -1112,6 +1238,9 @@ int main(void)
     }
     passed = connect_status == VPS_CLIENT_OK &&
              statement_status == VPS_CLIENT_OK &&
+             query_validation_status == VPS_CLIENT_OK &&
+             query_boundary_status == VPS_CLIENT_OK &&
+             query_rejection_status == VPS_CLIENT_OK &&
              cancel_status == VPS_CLIENT_OK &&
              health_status == VPS_CLIENT_OK &&
              metadata_status == VPS_CLIENT_OK &&
@@ -1128,21 +1257,32 @@ cleanup:
                                            VPS_CONNECTION_LEASE_DIRTY);
     }
     if (pool != NULL) (void)vps_connection_pool_destroy(&pool);
+    if (query_describe_initialized) {
+        vps_query_describe_result_cleanup(&query_describe);
+    }
+    if (query_validation_initialized) {
+        vps_query_validation_cleanup(&query_validation);
+    }
+    if (rejection_validation_initialized) {
+        vps_query_validation_cleanup(&rejection_validation);
+    }
     if (client_initialized) (void)vps_client_cleanup(&client);
     if (adapter_initialized) (void)vps_libpq_client_cleanup(&adapter);
     if (error_initialized) vps_error_reset(&error);
     if (identity_initialized) vps_identity_cleanup(&identity);
     if (config_initialized) (void)vps_connection_config_cleanup(&config);
     if (arguments_initialized) (void)vps_arguments_reset(&arguments);
-    if (passed && api_context.finish_count !=
-                      (network_requested ? 2U : 1U)) passed = 0;
+    if (passed && api_context.finish_count != 2U) passed = 0;
     (void)printf(
-        "async_connect_probe status=%s result=%s metadata=%s fixture=%s statement=%s cancel=%s health=%s network=%s error_class=%s sqlstate=%s phase=%s outcome=%s finish_count=%u log_events=%u\n",
+        "async_connect_probe status=%s result=%s metadata=%s fixture=%s statement=%s query_validation=%s query_boundary=%s query_rejection=%s cancel=%s health=%s network=%s error_class=%s sqlstate=%s phase=%s outcome=%s finish_count=%u log_events=%u\n",
         passed ? "passed" : "failed",
         vps_client_status_name(connect_status),
         vps_client_status_name(metadata_status),
         vps_client_status_name(fixture_status),
         vps_client_status_name(statement_status),
+        vps_client_status_name(query_validation_status),
+        vps_client_status_name(query_boundary_status),
+        vps_client_status_name(query_rejection_status),
         vps_client_status_name(cancel_status),
         vps_client_status_name(health_status),
         vps_client_status_name(network_status),

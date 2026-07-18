@@ -374,6 +374,34 @@ static uint32_t vps_libpq_default_result_field_type(
     return (uint32_t)PQftype((const PGresult *)result, index);
 }
 
+static const char *vps_libpq_default_result_field_name(
+    void *context, const void *result, int index)
+{
+    (void)context;
+    return PQfname((const PGresult *)result, index);
+}
+
+static int32_t vps_libpq_default_result_field_modifier(
+    void *context, const void *result, int index)
+{
+    (void)context;
+    return (int32_t)PQfmod((const PGresult *)result, index);
+}
+
+static uint32_t vps_libpq_default_result_field_relation(
+    void *context, const void *result, int index)
+{
+    (void)context;
+    return (uint32_t)PQftable((const PGresult *)result, index);
+}
+
+static int32_t vps_libpq_default_result_field_attribute(
+    void *context, const void *result, int index)
+{
+    (void)context;
+    return (int32_t)PQftablecol((const PGresult *)result, index);
+}
+
 static int vps_libpq_default_result_field_format(
     void *context, const void *result, int index)
 {
@@ -474,6 +502,10 @@ const VpsLibpqClientApi *vps_libpq_client_default_api(void)
         vps_libpq_default_result_parameter_type,
         vps_libpq_default_result_field_count,
         vps_libpq_default_result_field_type,
+        vps_libpq_default_result_field_name,
+        vps_libpq_default_result_field_modifier,
+        vps_libpq_default_result_field_relation,
+        vps_libpq_default_result_field_attribute,
         vps_libpq_default_result_field_format,
         vps_libpq_default_result_row_count,
         vps_libpq_default_result_value_is_null,
@@ -510,6 +542,10 @@ static int vps_libpq_api_valid(const VpsLibpqClientApi *api)
            api->result_parameter_type != NULL &&
            api->result_field_count != NULL &&
            api->result_field_type != NULL &&
+           api->result_field_name != NULL &&
+           api->result_field_modifier != NULL &&
+           api->result_field_relation != NULL &&
+           api->result_field_attribute != NULL &&
            api->result_field_format != NULL &&
            api->result_row_count != NULL &&
            api->result_value_is_null != NULL &&
@@ -1063,6 +1099,7 @@ VpsClientStatus vps_libpq_client_make_operations(
     operations->statement_poll = vps_libpq_statement_poll;
     operations->statement_wait = vps_libpq_statement_wait;
     operations->statement_metadata = vps_libpq_statement_metadata;
+    operations->statement_result_field = vps_libpq_statement_result_field;
     operations->statement_row = vps_libpq_statement_row;
     operations->statement_column = vps_libpq_statement_column;
     operations->statement_row_release = vps_libpq_statement_row_release;

@@ -33,6 +33,7 @@ set(VPS_SQLITE_AMALGAMATION_DIR
 option(VPS_BUILD_EXTENSION "Build the loadable extension and SQLite host tests" ON)
 option(VPS_ENABLE_ASAN "Enable AddressSanitizer for supported Windows targets" OFF)
 option(VPS_ENABLE_WINCRED "Build the Windows Credential Manager adapter" ON)
+option(VPS_BUILD_FUZZ "Build clang libFuzzer targets" OFF)
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
   set(VPS_DEPENDENCY_ARCH "x64")
@@ -479,6 +480,149 @@ target_link_libraries(vps_schema_fingerprint PUBLIC
 vps_apply_strict_warnings(vps_schema_fingerprint)
 vps_apply_asan(vps_schema_fingerprint)
 
+add_library(vps_query_source STATIC
+  src/vps_query_source.c
+)
+target_compile_features(vps_query_source PUBLIC c_std_11)
+set_target_properties(vps_query_source PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_query_source PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_query_source PUBLIC vps_logging)
+vps_apply_strict_warnings(vps_query_source)
+vps_apply_asan(vps_query_source)
+
+if(VPS_BUILD_FUZZ)
+  if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "[fuzz] VPS_BUILD_FUZZ requires Clang/clang-cl")
+  endif()
+  add_executable(vps_query_source_fuzz
+    tests/fuzz/vps_query_source_fuzz.c
+  )
+  target_compile_features(vps_query_source_fuzz PRIVATE c_std_11)
+  set_target_properties(vps_query_source_fuzz PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_query_source_fuzz PRIVATE vps_query_source)
+  if(CMAKE_C_SIMULATE_ID STREQUAL "MSVC")
+    execute_process(
+      COMMAND "${CMAKE_C_COMPILER}" --print-resource-dir
+      OUTPUT_VARIABLE VPS_CLANG_RESOURCE_DIR
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE VPS_CLANG_RESOURCE_RESULT
+    )
+    if(NOT VPS_CLANG_RESOURCE_RESULT EQUAL 0)
+      message(FATAL_ERROR "[fuzz] unable to locate the clang runtime directory")
+    endif()
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+      set(VPS_LIBFUZZER_RUNTIME
+        "${VPS_CLANG_RESOURCE_DIR}/lib/windows/clang_rt.fuzzer-x86_64.lib")
+    else()
+      set(VPS_LIBFUZZER_RUNTIME
+        "${VPS_CLANG_RESOURCE_DIR}/lib/windows/clang_rt.fuzzer-i386.lib")
+    endif()
+    if(NOT EXISTS "${VPS_LIBFUZZER_RUNTIME}")
+      message(FATAL_ERROR "[fuzz] clang libFuzzer runtime is missing")
+    endif()
+    target_compile_options(vps_query_source_fuzz PRIVATE
+      -fsanitize=fuzzer-no-link)
+    target_link_libraries(vps_query_source_fuzz PRIVATE
+      "${VPS_LIBFUZZER_RUNTIME}")
+  else()
+    target_compile_options(vps_query_source_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(vps_query_source_fuzz PRIVATE -fsanitize=fuzzer)
+  endif()
+  vps_apply_strict_warnings(vps_query_source_fuzz)
+endif()
+
+add_library(vps_query_profile STATIC
+  src/vps_query_profile.c
+)
+target_compile_features(vps_query_profile PUBLIC c_std_11)
+set_target_properties(vps_query_profile PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_query_profile PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_query_profile PUBLIC
+  vps_memory
+  vps_platform
+  vps_query_source
+)
+vps_apply_strict_warnings(vps_query_profile)
+vps_apply_asan(vps_query_profile)
+
+add_library(vps_query_validation STATIC
+  src/vps_query_validation.c
+)
+target_compile_features(vps_query_validation PUBLIC c_std_11)
+set_target_properties(vps_query_validation PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_query_validation PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_query_validation PUBLIC
+  vps_client
+  vps_query_source
+)
+vps_apply_strict_warnings(vps_query_validation)
+vps_apply_asan(vps_query_validation)
+
+add_library(vps_query_metadata STATIC
+  src/vps_query_indexes.c
+  src/vps_query_metadata.c
+)
+target_compile_features(vps_query_metadata PUBLIC c_std_11)
+set_target_properties(vps_query_metadata PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_query_metadata PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_query_metadata PUBLIC
+  vps_query_validation
+  vps_logging
+  vps_memory
+)
+vps_apply_strict_warnings(vps_query_metadata)
+vps_apply_asan(vps_query_metadata)
+
+add_library(vps_query_boundary STATIC
+  src/vps_query_boundary.c
+)
+target_compile_features(vps_query_boundary PUBLIC c_std_11)
+set_target_properties(vps_query_boundary PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_query_boundary PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_query_boundary PUBLIC vps_error vps_logging)
+vps_apply_strict_warnings(vps_query_boundary)
+vps_apply_asan(vps_query_boundary)
+
+add_library(vps_query_fingerprint STATIC
+  src/vps_query_fingerprint.c
+)
+target_compile_features(vps_query_fingerprint PUBLIC c_std_11)
+set_target_properties(vps_query_fingerprint PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_query_fingerprint PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_query_fingerprint PUBLIC vps_query_metadata)
+vps_apply_strict_warnings(vps_query_fingerprint)
+vps_apply_asan(vps_query_fingerprint)
+
 add_library(vps_libpq_client_metadata STATIC
   src/vps_libpq_client_metadata.c
 )
@@ -854,6 +998,70 @@ if(BUILD_TESTING)
   vps_apply_asan(vps_schema_fingerprint_test)
   add_test(NAME vps_schema_fingerprint COMMAND vps_schema_fingerprint_test)
 
+  add_executable(vps_query_source_test
+    tests/unit/vps_query_source_test.c
+  )
+  target_compile_features(vps_query_source_test PRIVATE c_std_11)
+  set_target_properties(vps_query_source_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_query_source_test PRIVATE vps_query_source)
+  vps_apply_strict_warnings(vps_query_source_test)
+  vps_apply_asan(vps_query_source_test)
+  add_test(NAME vps_query_source COMMAND vps_query_source_test)
+
+  add_executable(vps_query_profile_test
+    tests/unit/vps_query_profile_test.c
+  )
+  target_compile_features(vps_query_profile_test PRIVATE c_std_11)
+  set_target_properties(vps_query_profile_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_query_profile_test PRIVATE vps_query_profile)
+  vps_apply_strict_warnings(vps_query_profile_test)
+  vps_apply_asan(vps_query_profile_test)
+  add_test(NAME vps_query_profile COMMAND vps_query_profile_test)
+
+  add_executable(vps_query_validation_test
+    tests/unit/vps_query_validation_test.c
+  )
+  target_compile_features(vps_query_validation_test PRIVATE c_std_11)
+  set_target_properties(vps_query_validation_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_query_validation_test PRIVATE
+    vps_query_validation
+  )
+  vps_apply_strict_warnings(vps_query_validation_test)
+  vps_apply_asan(vps_query_validation_test)
+  add_test(NAME vps_query_validation COMMAND vps_query_validation_test)
+
+  add_executable(vps_query_metadata_test
+    tests/unit/vps_query_metadata_test.c
+  )
+  target_compile_features(vps_query_metadata_test PRIVATE c_std_11)
+  set_target_properties(vps_query_metadata_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_query_metadata_test PRIVATE vps_query_metadata)
+  vps_apply_strict_warnings(vps_query_metadata_test)
+  vps_apply_asan(vps_query_metadata_test)
+  add_test(NAME vps_query_metadata COMMAND vps_query_metadata_test)
+
+  add_executable(vps_query_boundary_test
+    tests/unit/vps_query_boundary_test.c
+  )
+  target_compile_features(vps_query_boundary_test PRIVATE c_std_11)
+  set_target_properties(vps_query_boundary_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_query_boundary_test PRIVATE vps_query_boundary)
+  vps_apply_strict_warnings(vps_query_boundary_test)
+  vps_apply_asan(vps_query_boundary_test)
+  add_test(NAME vps_query_boundary COMMAND vps_query_boundary_test)
+
+  add_executable(vps_query_fingerprint_test
+    tests/unit/vps_query_fingerprint_test.c
+  )
+  target_compile_features(vps_query_fingerprint_test PRIVATE c_std_11)
+  set_target_properties(vps_query_fingerprint_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_query_fingerprint_test PRIVATE
+    vps_query_fingerprint
+  )
+  vps_apply_strict_warnings(vps_query_fingerprint_test)
+  vps_apply_asan(vps_query_fingerprint_test)
+  add_test(NAME vps_query_fingerprint COMMAND vps_query_fingerprint_test)
+
   add_executable(vps_libpq_client_test
     tests/unit/vps_libpq_client_test.c
   )
@@ -893,6 +1101,7 @@ if(BUILD_TESTING)
     vps_libpq_client
     vps_libpq_client_metadata
     vps_connection_pool
+    vps_query_validation
     vps_schema_fingerprint
   )
   vps_apply_strict_warnings(vps_libpq_client_connect_integration_test)

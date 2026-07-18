@@ -7,14 +7,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VPS_CLIENT_CONTRACT_VERSION UINT32_C(1)
+#define VPS_CLIENT_CONTRACT_VERSION UINT32_C(2)
 #define VPS_CLIENT_WAIT_MAX_SLICE_MS UINT32_C(1000)
-#define VPS_CLIENT_MAX_QUERY_BYTES (1024U * 1024U)
+#define VPS_CLIENT_MAX_QUERY_BYTES ((1024U * 1024U) + 128U)
 #define VPS_CLIENT_MAX_PARAMETER_COUNT 65535U
 #define VPS_CLIENT_MAX_RESULT_FIELD_COUNT 4096U
 #define VPS_CLIENT_MAX_STATEMENT_TIMEOUT_MS UINT64_C(86400000)
 #define VPS_CLIENT_MAX_COLUMN_BYTES (16U * 1024U * 1024U)
 #define VPS_CLIENT_MAX_ROW_BYTES (64U * 1024U * 1024U)
+#define VPS_CLIENT_MAX_FIELD_NAME_BYTES 255U
 
 #define VPS_CLIENT_CAP_CONNECT     (UINT64_C(1) << 0)
 #define VPS_CLIENT_CAP_PREPARE     (UINT64_C(1) << 1)
@@ -156,6 +157,8 @@ typedef struct VpsClientStatementSpec {
     uint64_t timeout_ms;
     int prepare;
     int single_row;
+    /* Prepare/describe an initially unknown result layout without execution. */
+    int discover_result_fields;
 } VpsClientStatementSpec;
 
 typedef struct VpsClientStatementMetadata {
@@ -164,6 +167,17 @@ typedef struct VpsClientStatementMetadata {
     uint64_t query_fingerprint;
     int described;
 } VpsClientStatementMetadata;
+
+/* Borrowed descriptor; name remains valid until statement close. */
+typedef struct VpsClientResultFieldMetadata {
+    const char *name;
+    size_t name_length;
+    uint32_t type_oid;
+    int32_t type_modifier;
+    uint32_t origin_relation_oid;
+    int32_t origin_attribute_number;
+    VpsClientValueFormat format;
+} VpsClientResultFieldMetadata;
 
 typedef struct VpsClientColumnView {
     const void *data;
@@ -227,6 +241,12 @@ typedef VpsClientStatus (*VpsClientStatementMetadataFunction)(
     const void *backend_statement,
     VpsClientStatementMetadata *metadata,
     VpsError *error);
+typedef VpsClientStatus (*VpsClientStatementResultFieldFunction)(
+    void *context,
+    const void *backend_statement,
+    size_t field_index,
+    VpsClientResultFieldMetadata *field,
+    VpsError *error);
 typedef VpsClientStatus (*VpsClientStatementRowFunction)(
     void *context,
     const void *backend_statement,
@@ -267,6 +287,7 @@ typedef struct VpsClientOperations {
     VpsClientStatementPollFunction statement_poll;
     VpsClientStatementWaitFunction statement_wait;
     VpsClientStatementMetadataFunction statement_metadata;
+    VpsClientStatementResultFieldFunction statement_result_field;
     VpsClientStatementRowFunction statement_row;
     VpsClientStatementColumnFunction statement_column;
     VpsClientStatementRowReleaseFunction statement_row_release;
@@ -336,6 +357,11 @@ VpsClientStatus vps_client_statement_wait(
 VpsClientStatus vps_client_statement_metadata(
     const VpsClientStatement *statement,
     VpsClientStatementMetadata *metadata,
+    VpsError *error);
+VpsClientStatus vps_client_statement_result_field(
+    const VpsClientStatement *statement,
+    size_t field_index,
+    VpsClientResultFieldMetadata *field,
     VpsError *error);
 VpsClientStatus vps_client_statement_current_row(
     VpsClientStatement *statement,

@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-#define VPS_LIBPQ_CLIENT_API_VERSION UINT32_C(1)
+#define VPS_LIBPQ_CLIENT_API_VERSION UINT32_C(2)
 #define VPS_LIBPQ_CLIENT_MAX_KEYWORDS 20U
 #define VPS_LIBPQ_CLIENT_MAX_ACTIVE_POLLS 16U
 #define VPS_LIBPQ_CLIENT_MAX_CONNECT_TIMEOUT_MS UINT64_C(600000)
@@ -138,6 +138,18 @@ typedef struct VpsLibpqClientApi {
     uint32_t (*result_field_type)(void *context,
                                   const void *result,
                                   int index);
+    const char *(*result_field_name)(void *context,
+                                     const void *result,
+                                     int index);
+    int32_t (*result_field_modifier)(void *context,
+                                     const void *result,
+                                     int index);
+    uint32_t (*result_field_relation)(void *context,
+                                      const void *result,
+                                      int index);
+    int32_t (*result_field_attribute)(void *context,
+                                      const void *result,
+                                      int index);
     int (*result_field_format)(void *context,
                                const void *result,
                                int index);

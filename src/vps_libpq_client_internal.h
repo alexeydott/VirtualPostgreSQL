@@ -74,6 +74,12 @@ VpsClientStatus vps_libpq_statement_metadata(
     const void *statement,
     VpsClientStatementMetadata *metadata,
     VpsError *error);
+VpsClientStatus vps_libpq_statement_result_field(
+    void *context,
+    const void *statement,
+    size_t field_index,
+    VpsClientResultFieldMetadata *field,
+    VpsError *error);
 VpsClientStatus vps_libpq_statement_row(
     void *context,
     const void *statement,

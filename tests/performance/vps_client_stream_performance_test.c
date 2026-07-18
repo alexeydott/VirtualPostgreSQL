@@ -68,6 +68,15 @@ static VpsClientStatus stream_statement_metadata(
 { (void)context; (void)handle; (void)error;
   (void)memset(metadata,0,sizeof(*metadata)); metadata->result_field_count=1U;
   metadata->described=1; return VPS_CLIENT_OK; }
+static VpsClientStatus stream_statement_result_field(
+    void *context, const void *handle, size_t index,
+    VpsClientResultFieldMetadata *field, VpsError *error)
+{ static const char name[]="value"; (void)context; (void)handle; (void)error;
+  if(index!=0U||field==NULL)return VPS_CLIENT_INVALID_ARGUMENT;
+  (void)memset(field,0,sizeof(*field)); field->name=name;
+  field->name_length=sizeof(name)-1U; field->type_oid=23U;
+  field->type_modifier=-1; field->format=VPS_CLIENT_VALUE_TEXT;
+  return VPS_CLIENT_OK; }
 static VpsClientStatus stream_statement_row(void *context, const void *handle,
                                              size_t *count, VpsError *error)
 { (void)context; (void)handle; (void)error; *count=1U; return VPS_CLIENT_OK; }
@@ -117,6 +126,7 @@ int main(void)
     operations.statement_poll=stream_statement_poll;
     operations.statement_wait=stream_statement_wait;
     operations.statement_metadata=stream_statement_metadata;
+    operations.statement_result_field=stream_statement_result_field;
     operations.statement_row=stream_statement_row;
     operations.statement_column=stream_statement_column;
     operations.statement_row_release=stream_statement_row_release;

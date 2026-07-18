@@ -73,6 +73,10 @@ typedef struct FakeApi {
     int described_field_count;
     uint32_t described_field_types[8];
     int described_field_formats[8];
+    const char *described_field_names[8];
+    int32_t described_field_modifiers[8];
+    uint32_t described_field_relations[8];
+    int32_t described_field_attributes[8];
     const char *result_sqlstate;
     const char *result_primary_message;
     VpsLibpqResultStatus stream_statuses[8];
@@ -461,6 +465,23 @@ static uint32_t fake_result_field_type(void *context, const void *result,
                                        int index)
 { FakeApi *fake = (FakeApi *)context; (void)result;
   return fake->described_field_types[index]; }
+static const char *fake_result_field_name(void *context, const void *result,
+                                          int index)
+{ FakeApi *fake = (FakeApi *)context; (void)result;
+  return fake->described_field_names[index] != NULL
+             ? fake->described_field_names[index] : "value"; }
+static int32_t fake_result_field_modifier(void *context, const void *result,
+                                          int index)
+{ FakeApi *fake = (FakeApi *)context; (void)result;
+  return fake->described_field_modifiers[index]; }
+static uint32_t fake_result_field_relation(void *context, const void *result,
+                                           int index)
+{ FakeApi *fake = (FakeApi *)context; (void)result;
+  return fake->described_field_relations[index]; }
+static int32_t fake_result_field_attribute(void *context, const void *result,
+                                           int index)
+{ FakeApi *fake = (FakeApi *)context; (void)result;
+  return fake->described_field_attributes[index]; }
 static int fake_result_format(void *context, const void *result, int index)
 { FakeApi *fake = (FakeApi *)context; (void)result;
   return fake->described_field_formats[index]; }
@@ -578,6 +599,10 @@ static VpsLibpqClientApi fake_api(FakeApi *fake)
     api.result_parameter_type = fake_result_type;
     api.result_field_count = fake_result_field_count;
     api.result_field_type = fake_result_field_type;
+    api.result_field_name = fake_result_field_name;
+    api.result_field_modifier = fake_result_field_modifier;
+    api.result_field_relation = fake_result_field_relation;
+    api.result_field_attribute = fake_result_field_attribute;
     api.result_field_format = fake_result_format;
     api.result_row_count = fake_result_row_count;
     api.result_value_is_null = fake_result_is_null;

@@ -175,6 +175,7 @@ static int vps_client_operations_valid(const VpsClientOperations *operations)
            operations->statement_poll != NULL &&
            operations->statement_wait != NULL &&
            operations->statement_metadata != NULL &&
+           operations->statement_result_field != NULL &&
            operations->statement_row != NULL &&
            operations->statement_column != NULL &&
            operations->statement_row_release != NULL &&
@@ -195,7 +196,12 @@ static int vps_client_statement_spec_valid(
         spec->timeout_ms == 0U ||
         spec->timeout_ms > VPS_CLIENT_MAX_STATEMENT_TIMEOUT_MS ||
         (spec->prepare != 0 && spec->prepare != 1) ||
-        (spec->single_row != 0 && spec->single_row != 1)) return 0;
+        (spec->single_row != 0 && spec->single_row != 1) ||
+        (spec->discover_result_fields != 0 &&
+         spec->discover_result_fields != 1) ||
+        (spec->discover_result_fields &&
+         (!spec->prepare || spec->single_row ||
+          spec->result_field_count != 0U))) return 0;
     for (index = 0U; index < spec->query_length; ++index) {
         if (spec->query[index] == '\0') return 0;
     }
@@ -827,6 +833,32 @@ VpsClientStatus vps_client_statement_metadata(
         statement->connection->client->backend_context,
         statement->backend_statement, metadata, error);
     if (!vps_client_status_valid(result)) result = VPS_CLIENT_BACKEND_ERROR;
+    return result;
+}
+
+VpsClientStatus vps_client_statement_result_field(
+    const VpsClientStatement *statement,
+    size_t field_index,
+    VpsClientResultFieldMetadata *field,
+    VpsError *error)
+{
+    VpsClientStatementMetadata metadata;
+    VpsClientStatus result;
+    if (statement == NULL || field == NULL) {
+        return vps_client_fail(error, VPS_CLIENT_OPERATION_PREPARE,
+                               VPS_CLIENT_INVALID_ARGUMENT);
+    }
+    result = vps_client_statement_metadata(statement, &metadata, error);
+    if (result != VPS_CLIENT_OK) return result;
+    if (field_index >= metadata.result_field_count) {
+        return vps_client_fail(error, VPS_CLIENT_OPERATION_PREPARE,
+                               VPS_CLIENT_INVALID_ARGUMENT);
+    }
+    (void)memset(field, 0, sizeof(*field));
+    result = statement->connection->client->operations.statement_result_field(
+        statement->connection->client->backend_context,
+        statement->backend_statement, field_index, field, error);
+    if (!vps_client_status_valid(result)) return VPS_CLIENT_BACKEND_ERROR;
     return result;
 }
 

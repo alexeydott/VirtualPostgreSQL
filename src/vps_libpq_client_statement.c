@@ -28,6 +28,11 @@ typedef enum VpsLibpqStatementPhase {
     VPS_LIBPQ_STATEMENT_FAILED = 16
 } VpsLibpqStatementPhase;
 
+typedef struct VpsLibpqDescribedField {
+    VpsClientResultFieldMetadata metadata;
+    char name[VPS_CLIENT_MAX_FIELD_NAME_BYTES + 1U];
+} VpsLibpqDescribedField;
+
 typedef struct VpsLibpqStatement {
     VpsLibpqConnection *connection;
     VpsClientStatementSpec spec;
@@ -39,6 +44,9 @@ typedef struct VpsLibpqStatement {
     size_t parameter_values_size;
     size_t parameter_lengths_size;
     size_t parameter_formats_size;
+    VpsLibpqDescribedField *described_fields;
+    size_t described_fields_size;
+    size_t described_field_count;
     VpsDeadline deadline;
     void *current_result;
     void *cancel_connection;
@@ -310,6 +318,9 @@ static void vps_libpq_statement_release_arrays(
     VpsLibpqStatement *statement)
 {
     VpsAllocator *allocator = &statement->connection->client->allocator;
+    vps_memory_release(allocator, (void **)&statement->described_fields,
+                       statement->described_fields_size);
+    statement->described_field_count = 0U;
     vps_memory_release(allocator, (void **)&statement->parameter_formats,
                        statement->parameter_formats_size);
     vps_memory_release(allocator, (void **)&statement->parameter_lengths,
@@ -600,8 +611,10 @@ static VpsClientStatus vps_libpq_statement_check_metadata(
     int field_count = client->api.result_field_count(client->api.context,
                                                       result);
     size_t index;
-    if (field_count < 0 || (size_t)field_count !=
-                               statement->spec.result_field_count) {
+    if (field_count < 0 || (size_t)field_count >
+                               VPS_CLIENT_MAX_RESULT_FIELD_COUNT ||
+        (!statement->spec.discover_result_fields &&
+         (size_t)field_count != statement->spec.result_field_count)) {
         return vps_libpq_statement_error(
             statement, error, VPS_ERROR_CLASS_SCHEMA, NULL);
     }
@@ -623,6 +636,7 @@ static VpsClientStatus vps_libpq_statement_check_metadata(
             }
         }
     }
+    if (statement->spec.discover_result_fields) return VPS_CLIENT_OK;
     for (index = 0U; index < statement->spec.result_field_count; ++index) {
         uint32_t observed_type = client->api.result_field_type(
             client->api.context, result, (int)index);
@@ -637,6 +651,73 @@ static VpsClientStatus vps_libpq_statement_check_metadata(
                 statement, error, VPS_ERROR_CLASS_CONVERSION, NULL);
         }
     }
+    return VPS_CLIENT_OK;
+}
+
+static VpsClientStatus vps_libpq_statement_capture_metadata(
+    VpsLibpqStatement *statement,
+    const void *result,
+    VpsError *error)
+{
+    VpsLibpqClient *client = statement->connection->client;
+    int field_count = client->api.result_field_count(client->api.context,
+                                                      result);
+    size_t allocation_size;
+    size_t index;
+    if (!statement->spec.discover_result_fields) return VPS_CLIENT_OK;
+    if (field_count <= 0 ||
+        (size_t)field_count > VPS_CLIENT_MAX_RESULT_FIELD_COUNT ||
+        vps_size_multiply((size_t)field_count,
+                          sizeof(*statement->described_fields),
+                          &allocation_size) != VPS_MEMORY_OK ||
+        vps_memory_allocate(&client->allocator, allocation_size,
+                            (void **)&statement->described_fields) !=
+            VPS_MEMORY_OK) {
+        return vps_libpq_statement_error(statement, error,
+                                         VPS_ERROR_CLASS_MEMORY, NULL);
+    }
+    statement->described_fields_size = allocation_size;
+    (void)memset(statement->described_fields, 0, allocation_size);
+    for (index = 0U; index < (size_t)field_count; ++index) {
+        VpsLibpqDescribedField *field = &statement->described_fields[index];
+        const char *name = client->api.result_field_name(
+            client->api.context, result, (int)index);
+        size_t name_length = 0U;
+        if (name == NULL) {
+            return vps_libpq_statement_error(statement, error,
+                                             VPS_ERROR_CLASS_METADATA, NULL);
+        }
+        while (name_length <= VPS_CLIENT_MAX_FIELD_NAME_BYTES &&
+               name[name_length] != '\0') ++name_length;
+        if (name_length == 0U ||
+            name_length > VPS_CLIENT_MAX_FIELD_NAME_BYTES) {
+            return vps_libpq_statement_error(statement, error,
+                                             VPS_ERROR_CLASS_METADATA, NULL);
+        }
+        (void)memcpy(field->name, name, name_length + 1U);
+        field->metadata.name = field->name;
+        field->metadata.name_length = name_length;
+        field->metadata.type_oid = client->api.result_field_type(
+            client->api.context, result, (int)index);
+        field->metadata.type_modifier = client->api.result_field_modifier(
+            client->api.context, result, (int)index);
+        field->metadata.origin_relation_oid =
+            client->api.result_field_relation(client->api.context, result,
+                                               (int)index);
+        field->metadata.origin_attribute_number =
+            client->api.result_field_attribute(client->api.context, result,
+                                                (int)index);
+        field->metadata.format = (VpsClientValueFormat)
+            client->api.result_field_format(client->api.context, result,
+                                            (int)index);
+        if (field->metadata.type_oid == 0U ||
+            (field->metadata.format != VPS_CLIENT_VALUE_TEXT &&
+             field->metadata.format != VPS_CLIENT_VALUE_BINARY)) {
+            return vps_libpq_statement_error(statement, error,
+                                             VPS_ERROR_CLASS_METADATA, NULL);
+        }
+    }
+    statement->described_field_count = (size_t)field_count;
     return VPS_CLIENT_OK;
 }
 
@@ -680,6 +761,10 @@ static VpsClientStatus vps_libpq_statement_finish_result(
                        : vps_libpq_statement_check_metadata(
                              statement, statement->current_result,
                              mode == 1, error);
+    if (check_result == VPS_CLIENT_OK && mode == 1) {
+        check_result = vps_libpq_statement_capture_metadata(
+            statement, statement->current_result, error);
+    }
     client->api.clear_result(client->api.context, statement->current_result);
     statement->current_result = NULL;
     if (check_result != VPS_CLIENT_OK) return check_result;
@@ -1110,8 +1195,32 @@ VpsClientStatus vps_libpq_statement_metadata(
     (void)memset(metadata, 0, sizeof(*metadata));
     metadata->parameter_count = statement->spec.parameter_count;
     metadata->result_field_count = statement->spec.result_field_count;
+    if (statement->spec.discover_result_fields) {
+        metadata->result_field_count = statement->described_field_count;
+    }
     metadata->query_fingerprint = statement->query_hash;
     metadata->described = 1;
+    return VPS_CLIENT_OK;
+}
+
+VpsClientStatus vps_libpq_statement_result_field(
+    void *context,
+    const void *statement_value,
+    size_t field_index,
+    VpsClientResultFieldMetadata *field,
+    VpsError *error)
+{
+    const VpsLibpqClient *client = (const VpsLibpqClient *)context;
+    const VpsLibpqStatement *statement =
+        (const VpsLibpqStatement *)statement_value;
+    (void)error;
+    if (client == NULL || statement == NULL || field == NULL ||
+        statement->connection->client != client || !statement->described ||
+        !statement->spec.discover_result_fields ||
+        field_index >= statement->described_field_count) {
+        return VPS_CLIENT_INVALID_ARGUMENT;
+    }
+    *field = statement->described_fields[field_index].metadata;
     return VPS_CLIENT_OK;
 }
 
