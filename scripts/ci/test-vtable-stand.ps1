@@ -49,4 +49,4 @@ try {
     [Environment]::SetEnvironmentVariable('VPS_VTAB_TEST_CONNSTR', $previous)
 }
 
-Write-Output 'vtable_stand status=passed sources=table,view,query cursors=2'
+Write-Output 'vtable_stand status=passed sources=table,view,query planner=predicate,in,projection,order,limit,cost cursors=2'

@@ -7,7 +7,7 @@ SQLITE_EXTENSION_INIT1
 #include <stdint.h>
 
 #define VPS_MINIMUM_SQLITE_VERSION_NUMBER 3044000
-#define VPS_EXTENSION_VERSION "0.7.0"
+#define VPS_EXTENSION_VERSION "0.8.0"
 
 static void vps_version_sql(sqlite3_context *context,
                             int argument_count,
@@ -53,7 +53,7 @@ static void vps_capabilities_sql(sqlite3_context *context,
     (void)argument_count;
     (void)arguments;
     sqlite3_result_text(context,
-                        "read-only,module-v4,xIntegrity,directonly,async-libpq,single-row,metadata-placeholders", -1,
+                        "read-only,module-v4,xIntegrity,directonly,async-libpq,single-row,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,metadata-placeholders", -1,
                         SQLITE_STATIC);
 }
 

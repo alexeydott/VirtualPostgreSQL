@@ -7,6 +7,7 @@ SQLITE_EXTENSION_INIT3
 #include "vps_identity.h"
 #include "vps_libpq_client.h"
 #include "vps_libpq_client_conninfo.h"
+#include "vps_planner.h"
 #include "vps_query_validation.h"
 #include "vps_query_metadata.h"
 #include "vps_row_identity.h"
@@ -23,6 +24,8 @@ SQLITE_EXTENSION_INIT3
 
 #define VPS_VTAB_QUERY_LIMIT (1024U * 1024U)
 #define VPS_VTAB_DRIVE_LIMIT 65536U
+#define VPS_VTAB_PARAMETER_LIMIT (VPS_PLAN_DEFAULT_IN_LIMIT + VPS_PLAN_MAX_CONSTRAINTS)
+#define VPS_VTAB_PARAMETER_BYTES_LIMIT (4U * 1024U * 1024U)
 
 typedef enum VpsCursorState {
     VPS_CURSOR_NEW = 0,
@@ -55,6 +58,7 @@ typedef struct VpsTable {
     VpsClientResultFieldExpectation *expected_fields;
     size_t expected_fields_size;
     VpsBuffer scan_query;
+    uint64_t source_fingerprint;
     VpsModuleContext *module_context;
     uint16_t key_columns[VPS_QUERY_METADATA_MAX_KEY_COLUMNS];
     size_t key_column_count;
@@ -83,6 +87,17 @@ typedef struct VpsCursor {
     VpsConnectionLease lease;
     VpsClientStatement *statement;
     const VpsClientRowView *row;
+    VpsCompiledPlan plan;
+    VpsBuffer planned_query;
+    VpsBuffer parameter_bytes;
+    VpsClientParameterView *parameters;
+    size_t parameters_size;
+    size_t parameter_count;
+    VpsClientResultFieldExpectation *projected_fields;
+    size_t projected_fields_size;
+    uint16_t logical_to_remote[VPS_PLAN_MAX_COLUMNS];
+    int initialized_planned_query;
+    int initialized_parameter_bytes;
     VpsCursorState state;
     uint64_t cursor_id;
     uint64_t scan_counter;
@@ -101,6 +116,7 @@ static VpsConnectionPoolResult vps_vtab_pool_create(void *context,
 static VpsConnectionPoolResult vps_vtab_pool_ready(void *context,
                                                     void *connection);
 static void vps_vtab_pool_destroy(void *context, void *connection);
+static int vps_vtab_uuid_canonical(const unsigned char *value, size_t length);
 
 VpsModuleContext *vps_module_context_create(void)
 {
@@ -682,6 +698,30 @@ static int vps_declare_schema(sqlite3 *database, VpsTable *table)
     return sqlite3_vtab_config(database, SQLITE_VTAB_DIRECTONLY);
 }
 
+static uint64_t vps_vtab_source_fingerprint(const VpsTable *table)
+{
+    uint64_t hash = UINT64_C(1469598103934665603);
+    size_t index;
+    const unsigned char *query = table->scan_query.data;
+    for (index = 0U; index < table->scan_query.size; ++index) {
+        hash ^= query[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    for (index = 0U; index < table->described.field_count; ++index) {
+        const VpsQueryDescribeField *field = &table->described.fields[index];
+        size_t name_index;
+        hash ^= field->type_oid;
+        hash *= UINT64_C(1099511628211);
+        hash ^= (uint32_t)field->type_modifier;
+        hash *= UINT64_C(1099511628211);
+        for (name_index = 0U; name_index < field->name_length; ++name_index) {
+            hash ^= (unsigned char)field->name[name_index];
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    return hash;
+}
+
 static int vps_module_connect(sqlite3 *database,
                               void *auxiliary,
                               int argument_count,
@@ -714,6 +754,11 @@ static int vps_module_connect(sqlite3 *database,
         result = SQLITE_NOMEM;
     if (result == SQLITE_OK && !vps_resolve_row_identity(table))
         result = SQLITE_ERROR;
+    if (result == SQLITE_OK &&
+        table->described.field_count > VPS_PLAN_MAX_COLUMNS)
+        result = SQLITE_TOOBIG;
+    if (result == SQLITE_OK)
+        table->source_fingerprint = vps_vtab_source_fingerprint(table);
     if (result == SQLITE_OK) result = vps_declare_schema(database, table);
     if (result != SQLITE_OK) {
         if (error_out != NULL)
@@ -735,13 +780,216 @@ static int vps_module_disconnect(sqlite3_vtab *base)
     return vps_table_cleanup((VpsTable *)base);
 }
 
+static uint32_t vps_vtab_plan_capabilities(uint32_t type_oid)
+{
+    VpsCodecId codec = vps_type_codec_for_oid(type_oid);
+    switch (codec) {
+        case VPS_CODEC_BOOLEAN:
+        case VPS_CODEC_INTEGER:
+        case VPS_CODEC_UUID_TEXT:
+            return VPS_PLAN_CAP_EQUALITY | VPS_PLAN_CAP_ORDER |
+                   VPS_PLAN_CAP_EXACT;
+        case VPS_CODEC_BYTEA:
+            return VPS_PLAN_CAP_EQUALITY | VPS_PLAN_CAP_EXACT |
+                   VPS_PLAN_CAP_BINARY;
+        default:
+            return 0U;
+    }
+}
+
+static VpsPlanValueClass vps_vtab_value_class(int sqlite_type)
+{
+    switch (sqlite_type) {
+        case SQLITE_NULL: return VPS_PLAN_VALUE_NULL;
+        case SQLITE_INTEGER: return VPS_PLAN_VALUE_INTEGER;
+        case SQLITE_FLOAT: return VPS_PLAN_VALUE_REAL;
+        case SQLITE_TEXT: return VPS_PLAN_VALUE_TEXT;
+        case SQLITE_BLOB: return VPS_PLAN_VALUE_BLOB;
+        default: return VPS_PLAN_VALUE_UNKNOWN;
+    }
+}
+
+static VpsPlanValueClass vps_vtab_expected_value_class(uint32_t type_oid)
+{
+    VpsCodecId codec = vps_type_codec_for_oid(type_oid);
+    if (codec == VPS_CODEC_BYTEA) return VPS_PLAN_VALUE_BLOB;
+    if (codec == VPS_CODEC_UUID_TEXT) return VPS_PLAN_VALUE_TEXT;
+    if (codec == VPS_CODEC_BOOLEAN || codec == VPS_CODEC_INTEGER)
+        return VPS_PLAN_VALUE_INTEGER;
+    return VPS_PLAN_VALUE_UNKNOWN;
+}
+
+static int vps_vtab_constraint_operation(unsigned char sqlite_operation,
+                                         VpsPlanOperator *operation,
+                                         int *null_safe)
+{
+    *null_safe = 0;
+    switch (sqlite_operation) {
+        case SQLITE_INDEX_CONSTRAINT_EQ: *operation = VPS_PLAN_OP_EQ; return 1;
+        case SQLITE_INDEX_CONSTRAINT_NE: *operation = VPS_PLAN_OP_NE; return 1;
+        case SQLITE_INDEX_CONSTRAINT_LT: *operation = VPS_PLAN_OP_LT; return 1;
+        case SQLITE_INDEX_CONSTRAINT_LE: *operation = VPS_PLAN_OP_LE; return 1;
+        case SQLITE_INDEX_CONSTRAINT_GT: *operation = VPS_PLAN_OP_GT; return 1;
+        case SQLITE_INDEX_CONSTRAINT_GE: *operation = VPS_PLAN_OP_GE; return 1;
+        case SQLITE_INDEX_CONSTRAINT_ISNULL:
+            *operation = VPS_PLAN_OP_IS_NULL; return 1;
+        case SQLITE_INDEX_CONSTRAINT_ISNOTNULL:
+            *operation = VPS_PLAN_OP_IS_NOT_NULL; return 1;
+#if defined(SQLITE_INDEX_CONSTRAINT_IS)
+        case SQLITE_INDEX_CONSTRAINT_IS:
+            *operation = VPS_PLAN_OP_EQ; *null_safe = 1; return 1;
+#endif
+#if defined(SQLITE_INDEX_CONSTRAINT_LIMIT)
+        case SQLITE_INDEX_CONSTRAINT_LIMIT:
+            *operation = VPS_PLAN_OP_LIMIT; return 1;
+#endif
+#if defined(SQLITE_INDEX_CONSTRAINT_OFFSET)
+        case SQLITE_INDEX_CONSTRAINT_OFFSET:
+            *operation = VPS_PLAN_OP_OFFSET; return 1;
+#endif
+        default: return 0;
+    }
+}
+
 static int vps_module_best_index(sqlite3_vtab *table,
                                  sqlite3_index_info *index_info)
 {
-    (void)table;
-    if (index_info == NULL) return SQLITE_MISUSE;
-    index_info->estimatedCost = 1000000.0;
-    index_info->estimatedRows = 1000000;
+    VpsTable *vtab = (VpsTable *)table;
+    VpsPlannerColumn columns[VPS_PLAN_MAX_COLUMNS];
+    VpsPlannerConstraintInput constraints[VPS_PLAN_MAX_CONSTRAINTS];
+    VpsPlannerOrderInput order_terms[VPS_PLAN_MAX_ORDER_TERMS];
+    VpsPlannerRequest request;
+    VpsCompiledPlan plan;
+    VpsBuffer encoded;
+    size_t constraint_count = 0U;
+    size_t order_count = 0U;
+    size_t index;
+    char *owned_plan;
+    if (vtab == NULL || index_info == NULL ||
+        vtab->described.field_count > VPS_PLAN_MAX_COLUMNS ||
+        index_info->nConstraint < 0 ||
+        (size_t)index_info->nConstraint > VPS_PLAN_MAX_CONSTRAINTS ||
+        index_info->nOrderBy < 0 ||
+        (size_t)index_info->nOrderBy > VPS_PLAN_MAX_ORDER_TERMS)
+        return SQLITE_CONSTRAINT;
+    (void)memset(columns, 0, sizeof(columns));
+    (void)memset(constraints, 0, sizeof(constraints));
+    (void)memset(order_terms, 0, sizeof(order_terms));
+    for (index = 0U; index < vtab->described.field_count; ++index) {
+        columns[index].type_oid = vtab->described.fields[index].type_oid;
+        columns[index].capabilities =
+            vps_vtab_plan_capabilities(columns[index].type_oid);
+    }
+    for (index = 0U; index < (size_t)index_info->nConstraint; ++index) {
+        const struct sqlite3_index_constraint *source =
+            &index_info->aConstraint[index];
+        VpsPlannerConstraintInput *destination;
+        VpsPlanOperator operation;
+        sqlite3_value *rhs = NULL;
+        int null_safe = 0;
+        int is_in = 0;
+        if (!vps_vtab_constraint_operation(source->op, &operation,
+                                           &null_safe))
+            continue;
+        if (constraint_count >= VPS_PLAN_MAX_CONSTRAINTS) return SQLITE_TOOBIG;
+        destination = &constraints[constraint_count++];
+        destination->column = source->iColumn;
+        destination->operation = operation;
+        destination->source_index = (uint16_t)index;
+        destination->usable = source->usable != 0;
+        destination->null_safe = null_safe;
+        if (source->usable && source->iColumn >= 0 &&
+            operation == VPS_PLAN_OP_EQ &&
+            (columns[source->iColumn].capabilities &
+             (VPS_PLAN_CAP_EQUALITY | VPS_PLAN_CAP_EXACT)) ==
+                (VPS_PLAN_CAP_EQUALITY | VPS_PLAN_CAP_EXACT) &&
+            sqlite3_vtab_in(index_info, (int)index, -1)) {
+            is_in = 1;
+            destination->is_in = 1;
+            (void)sqlite3_vtab_in(index_info, (int)index, 1);
+        }
+        if (operation == VPS_PLAN_OP_IS_NULL ||
+            operation == VPS_PLAN_OP_IS_NOT_NULL ||
+            operation == VPS_PLAN_OP_LIMIT ||
+            operation == VPS_PLAN_OP_OFFSET)
+            destination->value_class = VPS_PLAN_VALUE_INTEGER;
+        else if (!is_in &&
+                 sqlite3_vtab_rhs_value(index_info, (int)index, &rhs) ==
+                     SQLITE_OK && rhs != NULL) {
+            destination->value_class = vps_vtab_value_class(
+                sqlite3_value_type(rhs));
+            if (destination->value_class != VPS_PLAN_VALUE_NULL &&
+                destination->value_class !=
+                    vps_vtab_expected_value_class(
+                        columns[source->iColumn].type_oid))
+                destination->value_class = VPS_PLAN_VALUE_UNKNOWN;
+            if (columns[source->iColumn].type_oid == 16U &&
+                destination->value_class == VPS_PLAN_VALUE_INTEGER &&
+                sqlite3_value_int64(rhs) != 0 && sqlite3_value_int64(rhs) != 1)
+                destination->value_class = VPS_PLAN_VALUE_UNKNOWN;
+            if (columns[source->iColumn].type_oid == 2950U &&
+                destination->value_class == VPS_PLAN_VALUE_TEXT &&
+                !vps_vtab_uuid_canonical(sqlite3_value_text(rhs),
+                                          (size_t)sqlite3_value_bytes(rhs)))
+                destination->value_class = VPS_PLAN_VALUE_UNKNOWN;
+        }
+        else if (is_in && source->iColumn >= 0) {
+            destination->value_class =
+                vps_vtab_expected_value_class(columns[source->iColumn].type_oid);
+        }
+    }
+    for (index = 0U; index < (size_t)index_info->nOrderBy; ++index) {
+        if (index_info->aOrderBy[index].iColumn < 0 ||
+            (size_t)index_info->aOrderBy[index].iColumn >=
+                vtab->described.field_count)
+            continue;
+        order_terms[order_count].column =
+            (uint16_t)index_info->aOrderBy[index].iColumn;
+        order_terms[order_count].descending =
+            index_info->aOrderBy[index].desc != 0;
+        ++order_count;
+    }
+    (void)memset(&request, 0, sizeof(request));
+    request.source_fingerprint = vtab->source_fingerprint;
+    request.columns = columns;
+    request.column_count = vtab->described.field_count;
+    request.columns_used = index_info->colUsed;
+    request.constraints = constraints;
+    request.constraint_count = constraint_count;
+    request.order_terms = order_terms;
+    request.order_count = order_count;
+    request.key_columns = vtab->key_columns;
+    request.key_column_count = vtab->key_column_count;
+    request.estimated_base_rows = UINT64_C(1000000);
+    request.logger = &vtab->logger;
+    if (vps_planner_compile(&request, &plan) != VPS_PLANNER_OK ||
+        vps_plan_encode(&plan, &vtab->allocator, &encoded) != VPS_PLANNER_OK)
+        return SQLITE_ERROR;
+    owned_plan = (char *)sqlite3_malloc64((sqlite3_uint64)encoded.size + 1U);
+    if (owned_plan == NULL) {
+        vps_buffer_reset(&encoded);
+        return SQLITE_NOMEM;
+    }
+    (void)memcpy(owned_plan, encoded.data, encoded.size);
+    owned_plan[encoded.size] = '\0';
+    vps_buffer_reset(&encoded);
+    for (index = 0U; index < plan.constraint_count; ++index) {
+        const VpsPlanConstraint *constraint = &plan.constraints[index];
+        struct sqlite3_index_constraint_usage *usage =
+            &index_info->aConstraintUsage[constraint->source_index];
+        usage->argvIndex = constraint->argument_index;
+        usage->omit = (unsigned char)(
+            (constraint->flags & VPS_PLAN_CONSTRAINT_RECHECK) == 0U);
+    }
+    index_info->idxNum = (int)VPS_PLAN_FORMAT_VERSION;
+    index_info->idxStr = owned_plan;
+    index_info->needToFreeIdxStr = 1;
+    index_info->orderByConsumed =
+        (plan.flags & VPS_PLAN_FLAG_ORDER_CONSUMED) != 0U;
+    index_info->estimatedRows = (sqlite3_int64)plan.estimated_rows;
+    index_info->estimatedCost = (double)plan.estimated_cost_milli / 1000.0;
+    if ((plan.flags & VPS_PLAN_FLAG_UNIQUE) != 0U)
+        index_info->idxFlags |= SQLITE_INDEX_SCAN_UNIQUE;
     return SQLITE_OK;
 }
 
@@ -779,6 +1027,23 @@ static int vps_cursor_release(VpsCursor *cursor)
         clean = 0;
     cursor->connection = NULL;
     cursor->row = NULL;
+    if (cursor->initialized_planned_query) {
+        vps_buffer_reset(&cursor->planned_query);
+        cursor->initialized_planned_query = 0;
+    }
+    if (cursor->initialized_parameter_bytes) {
+        vps_buffer_reset(&cursor->parameter_bytes);
+        cursor->initialized_parameter_bytes = 0;
+    }
+    vps_memory_release(&cursor->table->allocator,
+                       (void **)&cursor->parameters,
+                       cursor->parameters_size);
+    vps_memory_release(&cursor->table->allocator,
+                       (void **)&cursor->projected_fields,
+                       cursor->projected_fields_size);
+    cursor->parameters_size = 0U;
+    cursor->projected_fields_size = 0U;
+    cursor->parameter_count = 0U;
     cursor->state = VPS_CURSOR_CLOSED;
     return clean ? SQLITE_OK : SQLITE_ERROR;
 }
@@ -819,7 +1084,7 @@ static int vps_cursor_advance(VpsCursor *cursor, VpsError *error)
     }
     status = vps_client_statement_current_row(cursor->statement, &row, error);
     if (status != VPS_CLIENT_OK ||
-        vps_client_row_column_count(row) != cursor->table->described.field_count)
+        vps_client_row_column_count(row) != cursor->plan.projection_count)
         goto failed;
     cursor->row_bytes = 0U;
     for (index = 0U; index < vps_client_row_column_count(row); ++index) {
@@ -831,8 +1096,12 @@ static int vps_cursor_advance(VpsCursor *cursor, VpsError *error)
     }
     if (cursor->table->identity_mode == VPS_ROW_IDENTITY_STABLE_INTEGER) {
         VpsClientColumnView key;
-        if (vps_client_row_column(
-                row, cursor->table->key_columns[0], &key, error) !=
+        if (cursor->logical_to_remote[cursor->table->key_columns[0]] ==
+                UINT16_MAX ||
+            vps_client_row_column(
+                row,
+                cursor->logical_to_remote[cursor->table->key_columns[0]],
+                &key, error) !=
                 VPS_CLIENT_OK ||
             vps_row_identity_stable_integer(&key, &cursor->rowid) !=
                 VPS_ROW_IDENTITY_OK)
@@ -849,6 +1118,349 @@ failed:
                               "VirtualPostgreSQL scan failed");
 }
 
+static int vps_vtab_append_placeholder(VpsBuffer *query, size_t number)
+{
+    char buffer[32];
+    int length = snprintf(buffer, sizeof(buffer), "$%llu",
+                          (unsigned long long)number);
+    return length > 0 && (size_t)length < sizeof(buffer) &&
+           vps_append_bytes(query, buffer, (size_t)length);
+}
+
+static int vps_vtab_uuid_canonical(const unsigned char *value, size_t length)
+{
+    size_t index;
+    if (value == NULL || length != 36U) return 0;
+    for (index = 0U; index < length; ++index) {
+        int separator = index == 8U || index == 13U || index == 18U ||
+                        index == 23U;
+        if (separator) {
+            if (value[index] != '-') return 0;
+        } else if (!((value[index] >= '0' && value[index] <= '9') ||
+                     (value[index] >= 'a' && value[index] <= 'f')))
+            return 0;
+    }
+    return 1;
+}
+
+static int vps_vtab_value_compatible(sqlite3_value *value,
+                                     uint32_t type_oid,
+                                     VpsPlanValueClass expected)
+{
+    int type;
+    if (value == NULL) return 0;
+    type = sqlite3_value_type(value);
+    if (type == SQLITE_NULL) return 1;
+    if (expected == VPS_PLAN_VALUE_BLOB) return type == SQLITE_BLOB;
+    if (type_oid == 16U)
+        return type == SQLITE_INTEGER &&
+               (sqlite3_value_int64(value) == 0 ||
+                sqlite3_value_int64(value) == 1);
+    if (expected == VPS_PLAN_VALUE_INTEGER) return type == SQLITE_INTEGER;
+    if (type_oid == 2950U && type == SQLITE_TEXT)
+        return vps_vtab_uuid_canonical(sqlite3_value_text(value),
+                                       (size_t)sqlite3_value_bytes(value));
+    return expected == VPS_PLAN_VALUE_TEXT && type == SQLITE_TEXT;
+}
+
+static int vps_vtab_add_parameter(VpsCursor *cursor,
+                                  size_t *offsets,
+                                  sqlite3_value *value,
+                                  uint32_t type_oid,
+                                  VpsPlanValueClass expected)
+{
+    VpsClientParameterView *parameter;
+    const void *bytes = NULL;
+    size_t length = 0U;
+    size_t storage_length;
+    char integer[32];
+    int integer_length = 0;
+    int sqlite_type;
+    if (cursor->parameter_count >= VPS_VTAB_PARAMETER_LIMIT ||
+        !vps_vtab_value_compatible(value, type_oid, expected)) return 0;
+    sqlite_type = sqlite3_value_type(value);
+    parameter = &cursor->parameters[cursor->parameter_count];
+    (void)memset(parameter, 0, sizeof(*parameter));
+    parameter->type_oid = type_oid;
+    parameter->format = expected == VPS_PLAN_VALUE_BLOB
+                            ? VPS_CLIENT_VALUE_BINARY
+                            : VPS_CLIENT_VALUE_TEXT;
+    parameter->is_null = sqlite_type == SQLITE_NULL;
+    offsets[cursor->parameter_count] = cursor->parameter_bytes.size;
+    if (!parameter->is_null) {
+        if (expected == VPS_PLAN_VALUE_BLOB) {
+            bytes = sqlite3_value_blob(value);
+            length = (size_t)sqlite3_value_bytes(value);
+        } else if (type_oid == 16U) {
+            bytes = sqlite3_value_int64(value) == 0 ? "false" : "true";
+            length = sqlite3_value_int64(value) == 0 ? 5U : 4U;
+        } else if (expected == VPS_PLAN_VALUE_INTEGER) {
+            integer_length = snprintf(integer, sizeof(integer), "%lld",
+                                      (long long)sqlite3_value_int64(value));
+            if (integer_length <= 0 || (size_t)integer_length >= sizeof(integer))
+                return 0;
+            bytes = integer;
+            length = (size_t)integer_length;
+        } else {
+            bytes = sqlite3_value_text(value);
+            length = (size_t)sqlite3_value_bytes(value);
+        }
+        storage_length = length;
+        if (expected != VPS_PLAN_VALUE_BLOB) ++storage_length;
+        else if (storage_length == 0U) storage_length = 1U;
+        if (length == 0U) {
+            static const unsigned char empty = 0U;
+            bytes = &empty;
+        }
+        if (cursor->parameter_bytes.size > VPS_VTAB_PARAMETER_BYTES_LIMIT -
+                                               storage_length ||
+            vps_buffer_append(&cursor->parameter_bytes, bytes, length) !=
+                VPS_MEMORY_OK ||
+            (expected != VPS_PLAN_VALUE_BLOB &&
+             vps_buffer_append(&cursor->parameter_bytes, "\0", 1U) !=
+                 VPS_MEMORY_OK) ||
+            (expected == VPS_PLAN_VALUE_BLOB && length == 0U &&
+             vps_buffer_append(&cursor->parameter_bytes, bytes, 1U) !=
+                 VPS_MEMORY_OK))
+            return 0;
+        parameter->length = length;
+    }
+    ++cursor->parameter_count;
+    return 1;
+}
+
+static const char *vps_vtab_operator_sql(const VpsPlanConstraint *constraint)
+{
+    if ((constraint->flags & VPS_PLAN_CONSTRAINT_NULL_SAFE) != 0U)
+        return " IS NOT DISTINCT FROM ";
+    switch ((VpsPlanOperator)constraint->operation) {
+        case VPS_PLAN_OP_EQ: return " = ";
+        case VPS_PLAN_OP_NE: return " <> ";
+        case VPS_PLAN_OP_LT: return " < ";
+        case VPS_PLAN_OP_LE: return " <= ";
+        case VPS_PLAN_OP_GT: return " > ";
+        case VPS_PLAN_OP_GE: return " >= ";
+        default: return NULL;
+    }
+}
+
+static int vps_vtab_append_column_name(VpsBuffer *query,
+                                       const VpsTable *table,
+                                       size_t column)
+{
+    const VpsQueryDescribeField *field;
+    if (column >= table->described.field_count) return 0;
+    field = &table->described.fields[column];
+    return vps_append_pg_identifier(query, field->name, field->name_length);
+}
+
+static int vps_vtab_in_compatible(sqlite3_value *list,
+                                  const VpsPlanConstraint *constraint,
+                                  size_t *item_count)
+{
+    sqlite3_value *item = NULL;
+    int result;
+    *item_count = 0U;
+    if (list == NULL) return 0;
+    result = sqlite3_vtab_in_first(list, &item);
+    while (result == SQLITE_OK && item != NULL) {
+        if (*item_count >= VPS_PLAN_DEFAULT_IN_LIMIT ||
+            !vps_vtab_value_compatible(
+                item, constraint->type_oid,
+                (VpsPlanValueClass)constraint->value_class))
+            return 0;
+        ++*item_count;
+        result = sqlite3_vtab_in_next(list, &item);
+    }
+    return result == SQLITE_DONE || (result == SQLITE_OK && item == NULL);
+}
+
+static int vps_vtab_build_execution(VpsCursor *cursor,
+                                    int argument_count,
+                                    sqlite3_value **arguments)
+{
+    VpsTable *table = cursor->table;
+    size_t *offsets = NULL;
+    size_t offsets_size = 0U;
+    size_t index;
+    size_t where_count = 0U;
+    int result = 0;
+    if (cursor->plan.projection_count == 0U ||
+        cursor->plan.projection_count > table->described.field_count ||
+        cursor->plan.argument_count != (uint16_t)argument_count ||
+        vps_size_multiply(VPS_VTAB_PARAMETER_LIMIT, sizeof(*cursor->parameters),
+                          &cursor->parameters_size) != VPS_MEMORY_OK ||
+        vps_memory_allocate(&table->allocator, cursor->parameters_size,
+                            (void **)&cursor->parameters) != VPS_MEMORY_OK ||
+        vps_size_multiply(VPS_VTAB_PARAMETER_LIMIT, sizeof(*offsets),
+                          &offsets_size) != VPS_MEMORY_OK ||
+        vps_memory_allocate(&table->allocator, offsets_size,
+                            (void **)&offsets) != VPS_MEMORY_OK ||
+        vps_size_multiply(cursor->plan.projection_count,
+                          sizeof(*cursor->projected_fields),
+                          &cursor->projected_fields_size) != VPS_MEMORY_OK ||
+        vps_memory_allocate(&table->allocator, cursor->projected_fields_size,
+                            (void **)&cursor->projected_fields) != VPS_MEMORY_OK ||
+        vps_buffer_init(&cursor->planned_query, &table->allocator,
+                        VPS_VTAB_QUERY_LIMIT) != VPS_MEMORY_OK)
+        goto cleanup;
+    cursor->initialized_planned_query = 1;
+    if (vps_buffer_init(&cursor->parameter_bytes, &table->allocator,
+                        VPS_VTAB_PARAMETER_BYTES_LIMIT) != VPS_MEMORY_OK)
+        goto cleanup;
+    cursor->initialized_parameter_bytes = 1;
+    for (index = 0U; index < VPS_PLAN_MAX_COLUMNS; ++index)
+        cursor->logical_to_remote[index] = UINT16_MAX;
+    if (!vps_append_bytes(&cursor->planned_query, "SELECT ", 7U)) goto cleanup;
+    for (index = 0U; index < cursor->plan.projection_count; ++index) {
+        size_t logical = cursor->plan.projection[index];
+        if (logical >= table->described.field_count ||
+            (index != 0U &&
+             !vps_append_bytes(&cursor->planned_query, ",", 1U)) ||
+            !vps_vtab_append_column_name(&cursor->planned_query, table, logical))
+            goto cleanup;
+        cursor->logical_to_remote[logical] = (uint16_t)index;
+        cursor->projected_fields[index] = table->expected_fields[logical];
+    }
+    if (!vps_append_bytes(&cursor->planned_query, " FROM (", 7U) ||
+        !vps_append_bytes(&cursor->planned_query,
+                          (const char *)table->scan_query.data,
+                          table->scan_query.size) ||
+        !vps_append_bytes(&cursor->planned_query, ") AS vps_source", 15U))
+        goto cleanup;
+    for (index = 0U; index < cursor->plan.constraint_count; ++index) {
+        const VpsPlanConstraint *constraint = &cursor->plan.constraints[index];
+        sqlite3_value *argument = constraint->argument_index == 0U
+                                      ? NULL
+                                      : arguments[constraint->argument_index - 1U];
+        size_t item_count = 0U;
+        size_t item_index = 0U;
+        sqlite3_value *item = NULL;
+        int in_result;
+        const char *operator_sql;
+        const char *where_prefix;
+        if (constraint->operation == VPS_PLAN_OP_LIMIT ||
+            constraint->operation == VPS_PLAN_OP_OFFSET) continue;
+        if ((constraint->flags & VPS_PLAN_CONSTRAINT_IN) != 0U &&
+            !vps_vtab_in_compatible(argument, constraint, &item_count))
+            continue;
+        if ((constraint->flags & VPS_PLAN_CONSTRAINT_IN) == 0U &&
+            constraint->argument_index != 0U &&
+            !vps_vtab_value_compatible(
+                argument, constraint->type_oid,
+                (VpsPlanValueClass)constraint->value_class))
+            continue;
+        where_prefix = where_count == 0U ? " WHERE " : " AND ";
+        if (!vps_append_bytes(&cursor->planned_query, where_prefix,
+                              strlen(where_prefix)))
+            goto cleanup;
+        ++where_count;
+        if ((constraint->flags & VPS_PLAN_CONSTRAINT_IN) != 0U &&
+            item_count == 0U) {
+            if (!vps_append_bytes(&cursor->planned_query, "FALSE", 5U))
+                goto cleanup;
+            continue;
+        }
+        if (!vps_vtab_append_column_name(&cursor->planned_query, table,
+                                         (size_t)constraint->column))
+            goto cleanup;
+        if (constraint->operation == VPS_PLAN_OP_IS_NULL) {
+            if (!vps_append_bytes(&cursor->planned_query, " IS NULL", 8U))
+                goto cleanup;
+            continue;
+        }
+        if (constraint->operation == VPS_PLAN_OP_IS_NOT_NULL) {
+            if (!vps_append_bytes(&cursor->planned_query, " IS NOT NULL", 12U))
+                goto cleanup;
+            continue;
+        }
+        if ((constraint->flags & VPS_PLAN_CONSTRAINT_IN) != 0U) {
+            if (!vps_append_bytes(&cursor->planned_query, " IN (", 5U))
+                goto cleanup;
+            in_result = sqlite3_vtab_in_first(argument, &item);
+            while (in_result == SQLITE_OK && item != NULL) {
+                if ((item_index != 0U &&
+                     !vps_append_bytes(&cursor->planned_query, ",", 1U)) ||
+                    !vps_vtab_add_parameter(
+                        cursor, offsets, item, constraint->type_oid,
+                        (VpsPlanValueClass)constraint->value_class) ||
+                    !vps_vtab_append_placeholder(&cursor->planned_query,
+                                                 cursor->parameter_count))
+                    goto cleanup;
+                ++item_index;
+                in_result = sqlite3_vtab_in_next(argument, &item);
+            }
+            if (!(in_result == SQLITE_DONE ||
+                  (in_result == SQLITE_OK && item == NULL)) ||
+                !vps_append_bytes(&cursor->planned_query, ")", 1U))
+                goto cleanup;
+            continue;
+        }
+        operator_sql = vps_vtab_operator_sql(constraint);
+        if (operator_sql == NULL ||
+            !vps_append_bytes(&cursor->planned_query, operator_sql,
+                              strlen(operator_sql)) ||
+            !vps_vtab_add_parameter(
+                cursor, offsets, argument, constraint->type_oid,
+                (VpsPlanValueClass)constraint->value_class) ||
+            !vps_vtab_append_placeholder(&cursor->planned_query,
+                                         cursor->parameter_count))
+            goto cleanup;
+    }
+    if ((cursor->plan.flags & VPS_PLAN_FLAG_ORDER_CONSUMED) != 0U) {
+        if (!vps_append_bytes(&cursor->planned_query, " ORDER BY ", 10U))
+            goto cleanup;
+        for (index = 0U; index < cursor->plan.order_count; ++index) {
+            const VpsPlanOrderTerm *term = &cursor->plan.order_terms[index];
+            const char *suffix = term->descending
+                                     ? " DESC NULLS LAST" : " ASC NULLS FIRST";
+            if ((index != 0U &&
+                 !vps_append_bytes(&cursor->planned_query, ",", 1U)) ||
+                !vps_vtab_append_column_name(&cursor->planned_query, table,
+                                             term->column) ||
+                !vps_append_bytes(&cursor->planned_query, suffix,
+                                  strlen(suffix)))
+                goto cleanup;
+        }
+    }
+    for (index = 0U; index < cursor->plan.constraint_count; ++index) {
+        const VpsPlanConstraint *constraint = &cursor->plan.constraints[index];
+        sqlite3_value *argument;
+        sqlite3_int64 value;
+        const char *keyword;
+        if (constraint->operation != VPS_PLAN_OP_LIMIT &&
+            constraint->operation != VPS_PLAN_OP_OFFSET) continue;
+        argument = arguments[constraint->argument_index - 1U];
+        if (sqlite3_value_type(argument) != SQLITE_INTEGER) goto cleanup;
+        value = sqlite3_value_int64(argument);
+        if (constraint->operation == VPS_PLAN_OP_LIMIT && value < 0) continue;
+        keyword = constraint->operation == VPS_PLAN_OP_LIMIT
+                      ? " LIMIT " : " OFFSET ";
+        if (!vps_append_bytes(&cursor->planned_query, keyword,
+                              strlen(keyword)))
+            goto cleanup;
+        if (constraint->operation == VPS_PLAN_OP_OFFSET && value < 0) {
+            if (!vps_append_bytes(&cursor->planned_query, "0", 1U))
+                goto cleanup;
+        } else if (!vps_vtab_add_parameter(
+                       cursor, offsets, argument, 20U,
+                       VPS_PLAN_VALUE_INTEGER) ||
+                   !vps_vtab_append_placeholder(&cursor->planned_query,
+                                                cursor->parameter_count))
+            goto cleanup;
+    }
+    for (index = 0U; index < cursor->parameter_count; ++index)
+        if (!cursor->parameters[index].is_null)
+            cursor->parameters[index].value =
+                cursor->parameter_bytes.data + offsets[index];
+    if (!vps_append_bytes(&cursor->planned_query, "\0", 1U)) goto cleanup;
+    cursor->planned_query.size -= 1U;
+    result = 1;
+cleanup:
+    vps_memory_release(&table->allocator, (void **)&offsets, offsets_size);
+    return result;
+}
+
 static int vps_module_filter(sqlite3_vtab_cursor *base,
                              int index_number,
                              const char *index_string,
@@ -862,16 +1474,24 @@ static int vps_module_filter(sqlite3_vtab_cursor *base,
     VpsClientStatus status;
     int error_initialized = 0;
     int result;
-    (void)index_number;
-    (void)index_string;
-    (void)arguments;
-    if (cursor == NULL || argument_count != 0 ||
+    size_t index_string_length;
+    if (cursor == NULL || index_number != (int)VPS_PLAN_FORMAT_VERSION ||
+        index_string == NULL || argument_count < 0 ||
         (cursor->state != VPS_CURSOR_OPEN && cursor->state != VPS_CURSOR_EOF))
         return SQLITE_MISUSE;
     table = cursor->table;
     (void)vps_cursor_release(cursor);
     cursor->state = VPS_CURSOR_FILTERING;
     cursor->scan_counter = 0U;
+    index_string_length = strlen(index_string);
+    if (vps_plan_decode(index_string, index_string_length,
+                        table->source_fingerprint, &cursor->plan) !=
+            VPS_PLANNER_OK ||
+        !vps_vtab_build_execution(cursor, argument_count, arguments)) {
+        cursor->state = VPS_CURSOR_FAILED;
+        return vps_vtab_set_error(&table->base, SQLITE_CORRUPT_VTAB, NULL,
+                                  "VirtualPostgreSQL compiled plan rejected");
+    }
     if (vps_error_init(&error, &table->allocator) == VPS_MEMORY_OK)
         error_initialized = 1;
     status = vps_connection_pool_acquire(
@@ -883,10 +1503,12 @@ static int vps_module_filter(sqlite3_vtab_cursor *base,
         cursor->connection =
             (VpsClientConnection *)cursor->lease.connection;
     (void)memset(&spec, 0, sizeof(spec));
-    spec.query = (const char *)table->scan_query.data;
-    spec.query_length = table->scan_query.size;
-    spec.result_fields = table->expected_fields;
-    spec.result_field_count = table->described.field_count;
+    spec.query = (const char *)cursor->planned_query.data;
+    spec.query_length = cursor->planned_query.size;
+    spec.parameters = cursor->parameters;
+    spec.parameter_count = cursor->parameter_count;
+    spec.result_fields = cursor->projected_fields;
+    spec.result_field_count = cursor->plan.projection_count;
     spec.timeout_ms = 60000U;
     spec.single_row = 1;
     if (status == VPS_CLIENT_OK)
@@ -950,8 +1572,12 @@ static int vps_module_column(sqlite3_vtab_cursor *base,
         (void)memset(keys, 0, sizeof(keys));
         for (key_index = 0U;
              key_index < cursor->table->key_column_count; ++key_index) {
+            size_t logical = cursor->table->key_columns[key_index];
+            if (logical >= VPS_PLAN_MAX_COLUMNS ||
+                cursor->logical_to_remote[logical] == UINT16_MAX)
+                return SQLITE_CORRUPT_VTAB;
             if (vps_client_row_column(
-                    cursor->row, cursor->table->key_columns[key_index],
+                    cursor->row, cursor->logical_to_remote[logical],
                     &keys[key_index], NULL) != VPS_CLIENT_OK)
                 return SQLITE_ERROR;
         }
@@ -966,7 +1592,10 @@ static int vps_module_column(sqlite3_vtab_cursor *base,
     }
     if (vps_error_init(&error, &cursor->table->allocator) != VPS_MEMORY_OK)
         return SQLITE_NOMEM;
-    if (vps_client_row_column(cursor->row, (size_t)column_index, &column,
+    if ((size_t)column_index >= VPS_PLAN_MAX_COLUMNS ||
+        cursor->logical_to_remote[column_index] == UINT16_MAX ||
+        vps_client_row_column(cursor->row,
+                              cursor->logical_to_remote[column_index], &column,
                               &error) != VPS_CLIENT_OK) {
         vps_error_reset(&error);
         return SQLITE_ERROR;
@@ -1113,6 +1742,16 @@ static int vps_metadata_filter(sqlite3_vtab_cursor *cursor,
     return SQLITE_OK;
 }
 
+static int vps_metadata_best_index(sqlite3_vtab *table,
+                                   sqlite3_index_info *index_info)
+{
+    (void)table;
+    if (index_info == NULL) return SQLITE_MISUSE;
+    index_info->estimatedCost = 1000000.0;
+    index_info->estimatedRows = 1000000;
+    return SQLITE_OK;
+}
+
 static int vps_metadata_next(sqlite3_vtab_cursor *cursor)
 {
     if (cursor == NULL) return SQLITE_MISUSE;
@@ -1146,7 +1785,7 @@ static int vps_metadata_rowid(sqlite3_vtab_cursor *cursor,
 const sqlite3_module VPS_METADATA_MODULE = {
     .iVersion = 4,
     .xConnect = vps_metadata_connect,
-    .xBestIndex = vps_module_best_index,
+    .xBestIndex = vps_metadata_best_index,
     .xDisconnect = vps_metadata_disconnect,
     .xOpen = vps_metadata_open,
     .xClose = vps_metadata_close,

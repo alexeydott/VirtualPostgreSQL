@@ -623,6 +623,37 @@ target_link_libraries(vps_query_fingerprint PUBLIC vps_query_metadata)
 vps_apply_strict_warnings(vps_query_fingerprint)
 vps_apply_asan(vps_query_fingerprint)
 
+add_library(vps_planner STATIC
+  src/vps_planner.c
+)
+target_compile_features(vps_planner PUBLIC c_std_11)
+set_target_properties(vps_planner PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_planner PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_planner PUBLIC vps_logging vps_memory)
+vps_apply_strict_warnings(vps_planner)
+vps_apply_asan(vps_planner)
+
+if(VPS_BUILD_FUZZ)
+  add_executable(vps_planner_fuzz tests/fuzz/vps_planner_fuzz.c)
+  target_compile_features(vps_planner_fuzz PRIVATE c_std_11)
+  set_target_properties(vps_planner_fuzz PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_planner_fuzz PRIVATE vps_planner)
+  if(CMAKE_C_SIMULATE_ID STREQUAL "MSVC")
+    target_compile_options(vps_planner_fuzz PRIVATE -fsanitize=fuzzer-no-link)
+    target_link_libraries(vps_planner_fuzz PRIVATE
+      "${VPS_LIBFUZZER_RUNTIME}")
+  else()
+    target_compile_options(vps_planner_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(vps_planner_fuzz PRIVATE -fsanitize=fuzzer)
+  endif()
+  vps_apply_strict_warnings(vps_planner_fuzz)
+endif()
+
 add_library(vps_type_codec STATIC
   src/vps_type_codec.c
 )
@@ -805,6 +836,7 @@ if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
     vps_identity
     vps_libpq_client
     vps_libpq_client_conninfo
+    vps_planner
     vps_query_validation
     vps_row_identity
     vps_type_codec
@@ -1123,6 +1155,23 @@ if(BUILD_TESTING)
   vps_apply_asan(vps_query_fingerprint_test)
   add_test(NAME vps_query_fingerprint COMMAND vps_query_fingerprint_test)
 
+  add_executable(vps_planner_test tests/unit/vps_planner_test.c)
+  target_compile_features(vps_planner_test PRIVATE c_std_11)
+  set_target_properties(vps_planner_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_planner_test PRIVATE vps_planner)
+  vps_apply_strict_warnings(vps_planner_test)
+  vps_apply_asan(vps_planner_test)
+  add_test(NAME vps_planner COMMAND vps_planner_test)
+
+  add_executable(vps_planner_fuzz_smoke_test
+    tests/unit/vps_planner_fuzz_smoke_test.c)
+  target_compile_features(vps_planner_fuzz_smoke_test PRIVATE c_std_11)
+  set_target_properties(vps_planner_fuzz_smoke_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_planner_fuzz_smoke_test PRIVATE vps_planner)
+  vps_apply_strict_warnings(vps_planner_fuzz_smoke_test)
+  vps_apply_asan(vps_planner_fuzz_smoke_test)
+  add_test(NAME vps_planner_fuzz_smoke COMMAND vps_planner_fuzz_smoke_test)
+
   add_executable(vps_libpq_client_test
     tests/unit/vps_libpq_client_test.c
   )
@@ -1256,6 +1305,7 @@ if(BUILD_TESTING)
       vps_identity
       vps_libpq_client
       vps_libpq_client_conninfo
+      vps_planner
       vps_query_validation
       vps_row_identity
       vps_type_codec

@@ -35,8 +35,8 @@ static int vps_query_text(sqlite3 *database,
     }
     if (!passed) {
         (void)fprintf(stderr,
-                      "[host] level=error operation=query class=unexpected-result sqlite=%s\n",
-                      sqlite3_errmsg(database));
+                      "[host] level=error operation=query class=unexpected-result expected=%s sqlite=%s\n",
+                      expected, sqlite3_errmsg(database));
     }
     (void)sqlite3_finalize(statement);
     return passed;
@@ -49,6 +49,20 @@ static int vps_query_positive_integer(sqlite3 *database, const char *sql)
                      SQLITE_OK &&
                  sqlite3_step(statement) == SQLITE_ROW &&
                  sqlite3_column_int(statement, 0) > 0;
+    (void)sqlite3_finalize(statement);
+    return passed;
+}
+
+static int vps_query_contains(sqlite3 *database,
+                              const char *sql,
+                              const char *expected)
+{
+    sqlite3_stmt *statement = NULL;
+    const unsigned char *value;
+    int passed = sqlite3_prepare_v2(database, sql, -1, &statement, NULL) ==
+                 SQLITE_OK && sqlite3_step(statement) == SQLITE_ROW;
+    value = passed ? sqlite3_column_text(statement, 3) : NULL;
+    passed = value != NULL && strstr((const char *)value, expected) != NULL;
     (void)sqlite3_finalize(statement);
     return passed;
 }
@@ -94,6 +108,63 @@ static int vps_runtime_contour(sqlite3 *database, const char *connstr)
         "SELECT CAST(id AS TEXT) || ':' || CAST(n IS NULL AS TEXT) || ':' || "
         "hex(b) || ':' || u FROM vps_query",
         "7:1:0041:550e8400-e29b-41d4-a716-446655440000");
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_planner USING VirtualPostgreSQL("
+        "connstr=%Q,source=query,query=%Q,mode=ro,key_columns=id)",
+        connstr,
+        "SELECT * FROM (VALUES "
+        "(1::pg_catalog.int8,true,'550e8400-e29b-41d4-a716-446655440000'::pg_catalog.uuid,'b'::pg_catalog.text),"
+        "(2::pg_catalog.int8,false,'550e8400-e29b-41d4-a716-446655440001'::pg_catalog.uuid,NULL::pg_catalog.text),"
+        "(3::pg_catalog.int8,true,'550e8400-e29b-41d4-a716-446655440002'::pg_catalog.uuid,'a'::pg_catalog.text)) "
+        "AS p(id,enabled,u,n)");
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_query_text(database,
+                             "SELECT group_concat(id, ',') FROM vps_planner "
+                             "WHERE id IN (1,3,NULL) ORDER BY id",
+                             "1,3");
+    passed &= vps_query_text(database,
+                             "SELECT CAST(enabled AS TEXT) || ':' || u "
+                             "FROM vps_planner WHERE id=2",
+                             "0:550e8400-e29b-41d4-a716-446655440001");
+    passed &= vps_query_text(database,
+                             "SELECT group_concat(COALESCE(n,'NULL'), ',') "
+                             "FROM (SELECT n FROM vps_planner ORDER BY n ASC)",
+                             "NULL,a,b");
+    passed &= vps_query_text(database,
+                             "SELECT CAST(id AS TEXT) FROM vps_planner "
+                             "ORDER BY id LIMIT 1 OFFSET 1",
+                             "2");
+    passed &= vps_query_text(database,
+                             "SELECT group_concat(id, ',') FROM "
+                             "(SELECT id FROM vps_planner ORDER BY id "
+                             "LIMIT -1 OFFSET -5)",
+                             "1,2,3");
+    passed &= vps_query_text(database,
+                             "SELECT group_concat(id, ',') FROM "
+                             "(SELECT id FROM vps_planner ORDER BY n DESC "
+                             "LIMIT 2)",
+                             "1,3");
+    passed &= vps_query_text(database,
+                             "SELECT group_concat(id, ',') FROM vps_planner "
+                             "WHERE id IN (1,'not-an-integer')",
+                             "1");
+    passed &= vps_query_text(database,
+                             "SELECT CAST(count(*) AS TEXT) FROM vps_planner "
+                             "WHERE n='b'",
+                             "1");
+    passed &= vps_query_text(database,
+                             "SELECT CAST(count(*) AS TEXT) FROM vps_planner "
+                             "WHERE u=2",
+                             "0");
+    passed &= vps_query_text(database,
+                             "SELECT CAST(count(*) AS TEXT) FROM vps_planner "
+                             "WHERE enabled=2",
+                             "0");
+    passed &= vps_query_contains(
+        database, "EXPLAIN QUERY PLAN SELECT id FROM vps_planner WHERE id=2",
+        "VIRTUAL TABLE INDEX 1:");
     passed &= sqlite3_prepare_v2(database,
                                 "SELECT oid FROM vps_table LIMIT 2", -1,
                                 &left, NULL) == SQLITE_OK;
@@ -163,7 +234,7 @@ int main(int argument_count, char **arguments)
     if (passed) {
         passed &= vps_query_text(database,
                                  "SELECT virtualpostgresql_version()",
-                                 "0.7.0");
+                                 "0.8.0");
         passed &= vps_query_text(database,
                                  "SELECT virtualpostgresql_build_arch()",
                                  expected_architecture);
@@ -175,6 +246,10 @@ int main(int argument_count, char **arguments)
         passed &= vps_query_text(
             database,
             "SELECT CAST(instr(virtualpostgresql_capabilities(), 'single-row') > 0 AS TEXT)",
+            "1");
+        passed &= vps_query_text(
+            database,
+            "SELECT CAST(instr(virtualpostgresql_capabilities(), 'planner') > 0 AS TEXT)",
             "1");
         passed &= vps_exec_expect(
             database,
