@@ -1,12 +1,12 @@
-# Примеры
+# Examples
 
-Примеры не содержат credentials. Перед запуском зарегистрируйте безопасный
-`credential_ref` в host provider либо замените его локальным non-production
-connection mode, понимая последствия хранения `connstr` в SQLite schema.
+The examples do not contain credentials. Before running them, register a secure
+`credential_ref` with your hosting provider or replace it with a local connection mode not intended for a production environment,
+keeping in mind the implications of storing `connstr` in the SQLite schema.
 
-| Файл | Назначение |
+| File | Purpose |
 |---|---|
-| `read-only.sql` | table/query sources, metadata и pushdown |
-| `dml-transactions.sql` | keyed DML, defaults, optimistic identity и savepoint |
+| `read-only.sql` | table/query sources, metadata, and pushdown |
+| `dml-transactions.sql` | DML with keys, defaults, optimistic identity, and savepoint |
 | `spatial.sql` | WKT/WKB/EWKT/EWKB configuration |
-| `credential-provider.c` | минимальный ABI 1.0 provider skeleton |
+| `credential-provider.c` | minimal ABI 1.0 provider skeleton |
