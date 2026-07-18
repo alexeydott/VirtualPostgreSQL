@@ -429,6 +429,71 @@ target_link_libraries(vps_retry PUBLIC vps_error vps_logging)
 vps_apply_strict_warnings(vps_retry)
 vps_apply_asan(vps_retry)
 
+add_library(vps_metadata STATIC
+  src/vps_metadata.c
+  src/vps_metadata_key.c
+  src/vps_metadata_policy.c
+)
+target_compile_features(vps_metadata PUBLIC c_std_11)
+set_target_properties(vps_metadata PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_metadata PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_metadata PUBLIC vps_logging vps_memory)
+vps_apply_strict_warnings(vps_metadata)
+vps_apply_asan(vps_metadata)
+
+add_library(vps_type_registry STATIC
+  src/vps_type_registry.c
+)
+target_compile_features(vps_type_registry PUBLIC c_std_11)
+set_target_properties(vps_type_registry PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_type_registry PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_type_registry PUBLIC vps_metadata)
+vps_apply_strict_warnings(vps_type_registry)
+vps_apply_asan(vps_type_registry)
+
+add_library(vps_schema_fingerprint STATIC
+  src/vps_schema_fingerprint.c
+)
+target_compile_features(vps_schema_fingerprint PUBLIC c_std_11)
+set_target_properties(vps_schema_fingerprint PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_schema_fingerprint PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_schema_fingerprint PUBLIC
+  vps_metadata
+  vps_type_registry
+)
+vps_apply_strict_warnings(vps_schema_fingerprint)
+vps_apply_asan(vps_schema_fingerprint)
+
+add_library(vps_libpq_client_metadata STATIC
+  src/vps_libpq_client_metadata.c
+)
+target_compile_features(vps_libpq_client_metadata PUBLIC c_std_11)
+set_target_properties(vps_libpq_client_metadata PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_libpq_client_metadata PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_libpq_client_metadata PUBLIC vps_client vps_metadata)
+vps_apply_strict_warnings(vps_libpq_client_metadata)
+vps_apply_asan(vps_libpq_client_metadata)
+
 if(EXISTS "${VPS_LIBPQ_INCLUDE_DIR}/libpq-fe.h" AND
    EXISTS "${VPS_LIBPQ_LIBRARY_DIR}/libpq.lib")
   add_library(vps_libpq_client_conninfo STATIC
@@ -754,6 +819,41 @@ if(BUILD_TESTING)
   vps_apply_asan(vps_retry_test)
   add_test(NAME vps_retry COMMAND vps_retry_test)
 
+  add_executable(vps_metadata_test tests/unit/vps_metadata_test.c)
+  target_compile_features(vps_metadata_test PRIVATE c_std_11)
+  set_target_properties(vps_metadata_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_metadata_test PRIVATE
+    vps_libpq_client_metadata
+    vps_metadata
+  )
+  vps_apply_strict_warnings(vps_metadata_test)
+  vps_apply_asan(vps_metadata_test)
+  add_test(NAME vps_metadata COMMAND vps_metadata_test)
+
+  add_executable(vps_type_registry_test
+    tests/unit/vps_type_registry_test.c
+  )
+  target_compile_features(vps_type_registry_test PRIVATE c_std_11)
+  set_target_properties(vps_type_registry_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_type_registry_test PRIVATE vps_type_registry)
+  vps_apply_strict_warnings(vps_type_registry_test)
+  vps_apply_asan(vps_type_registry_test)
+  add_test(NAME vps_type_registry COMMAND vps_type_registry_test)
+
+  add_executable(vps_schema_fingerprint_test
+    tests/unit/vps_schema_fingerprint_test.c
+  )
+  target_compile_features(vps_schema_fingerprint_test PRIVATE c_std_11)
+  set_target_properties(vps_schema_fingerprint_test PROPERTIES
+    C_EXTENSIONS OFF
+  )
+  target_link_libraries(vps_schema_fingerprint_test PRIVATE
+    vps_schema_fingerprint
+  )
+  vps_apply_strict_warnings(vps_schema_fingerprint_test)
+  vps_apply_asan(vps_schema_fingerprint_test)
+  add_test(NAME vps_schema_fingerprint COMMAND vps_schema_fingerprint_test)
+
   add_executable(vps_libpq_client_test
     tests/unit/vps_libpq_client_test.c
   )
@@ -791,7 +891,9 @@ if(BUILD_TESTING)
   endif()
   target_link_libraries(vps_libpq_client_connect_integration_test PRIVATE
     vps_libpq_client
+    vps_libpq_client_metadata
     vps_connection_pool
+    vps_schema_fingerprint
   )
   vps_apply_strict_warnings(vps_libpq_client_connect_integration_test)
   vps_apply_asan(vps_libpq_client_connect_integration_test)

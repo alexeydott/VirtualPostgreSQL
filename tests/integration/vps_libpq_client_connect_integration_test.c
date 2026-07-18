@@ -1,5 +1,7 @@
 #include "vps_libpq_client.h"
+#include "vps_libpq_client_metadata.h"
 #include "vps_connection_pool.h"
+#include "vps_schema_fingerprint.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +17,8 @@
 #define VPS_ASYNC_ENV_CHANNEL_BINDING "VPS_ASYNC_TEST_CHANNEL_BINDING"
 #define VPS_ASYNC_ENV_FIXTURE "VPS_ASYNC_TEST_FIXTURE"
 #define VPS_ASYNC_ENV_NETWORK_LOSS "VPS_ASYNC_TEST_NETWORK_LOSS"
+#define VPS_ASYNC_ENV_METADATA_SCHEMA "VPS_ASYNC_TEST_METADATA_SCHEMA"
+#define VPS_ASYNC_ENV_METADATA_TABLE "VPS_ASYNC_TEST_METADATA_TABLE"
 
 typedef struct VpsAsyncEnvironment {
     const char *host;
@@ -243,6 +247,271 @@ static VpsClientStatus vps_async_execute_command(
         status == VPS_CLIENT_OK) {
         status = VPS_CLIENT_BACKEND_ERROR;
     }
+    return status;
+}
+
+typedef struct VpsAsyncMetadataRow {
+    VpsClientColumnView columns[VPS_METADATA_MAX_FIELDS];
+} VpsAsyncMetadataRow;
+
+static int vps_async_metadata_is_null(void *context, size_t row, size_t field)
+{
+    VpsAsyncMetadataRow *input = (VpsAsyncMetadataRow *)context;
+    (void)row;
+    return input->columns[field].is_null;
+}
+
+static const void *vps_async_metadata_value(void *context,
+                                            size_t row,
+                                            size_t field)
+{
+    VpsAsyncMetadataRow *input = (VpsAsyncMetadataRow *)context;
+    (void)row;
+    return input->columns[field].data;
+}
+
+static size_t vps_async_metadata_length(void *context,
+                                        size_t row,
+                                        size_t field)
+{
+    VpsAsyncMetadataRow *input = (VpsAsyncMetadataRow *)context;
+    (void)row;
+    return input->columns[field].length;
+}
+
+static VpsClientStatus vps_async_catalog_fetch(
+    VpsClientConnection *connection,
+    VpsCatalogQuery query,
+    const VpsClientParameterView *parameters,
+    size_t parameter_count,
+    VpsMetadataRowSet *rowset,
+    VpsError *error)
+{
+    VpsLibpqMetadataStatement metadata_statement;
+    VpsClientStatement *statement = NULL;
+    VpsClientStatus status;
+    VpsMetadataInput input;
+    VpsAsyncMetadataRow input_row;
+    size_t rows = 0U;
+    (void)memset(&input, 0, sizeof(input));
+    (void)memset(&input_row, 0, sizeof(input_row));
+    if (vps_libpq_metadata_statement_init(
+            &metadata_statement, query, parameters, parameter_count, 5000U) !=
+        VPS_METADATA_OK) return VPS_CLIENT_INVALID_ARGUMENT;
+    input.context = &input_row;
+    input.field_count = metadata_statement.statement.result_field_count;
+    input.is_null = vps_async_metadata_is_null;
+    input.value = vps_async_metadata_value;
+    input.length = vps_async_metadata_length;
+    status = vps_client_statement_open(connection,
+                                       &metadata_statement.statement,
+                                       &statement, error);
+    if (status == VPS_CLIENT_OK)
+        status = vps_client_statement_start(statement,
+                                            VPS_CLIENT_OPERATION_EXECUTE,
+                                            error);
+    if (status == VPS_CLIENT_OK) status = vps_async_drive_statement(statement, error);
+    while (status == VPS_CLIENT_OK &&
+           vps_client_statement_state(statement) != VPS_CLIENT_STATEMENT_COMPLETE) {
+        const VpsClientRowView *row = NULL;
+        size_t field;
+        status = vps_client_statement_start(statement,
+                                            VPS_CLIENT_OPERATION_FETCH,
+                                            error);
+        if (status == VPS_CLIENT_OK)
+            status = vps_async_drive_statement(statement, error);
+        if (status != VPS_CLIENT_OK ||
+            vps_client_statement_state(statement) == VPS_CLIENT_STATEMENT_COMPLETE)
+            break;
+        status = vps_client_statement_current_row(statement, &row, error);
+        if (status == VPS_CLIENT_OK &&
+            vps_client_row_column_count(row) != input.field_count)
+            status = VPS_CLIENT_BACKEND_ERROR;
+        for (field = 0U; status == VPS_CLIENT_OK && field < input.field_count;
+             ++field)
+            status = vps_client_row_column(row, field,
+                                           &input_row.columns[field], error);
+        input.row_count = 1U;
+        if (status == VPS_CLIENT_OK &&
+            vps_metadata_rowset_append(rowset, query, &input) != VPS_METADATA_OK)
+            status = VPS_CLIENT_BACKEND_ERROR;
+        if (status == VPS_CLIENT_OK) {
+            ++rows;
+            status = vps_client_statement_row_consumed(statement, error);
+        }
+    }
+    if (status == VPS_CLIENT_OK && rows == 0U) {
+        input.row_count = 0U;
+        if (vps_metadata_rowset_copy(rowset, query, &input) != VPS_METADATA_OK)
+            status = VPS_CLIENT_BACKEND_ERROR;
+    }
+    if (vps_client_statement_close(&statement) != VPS_CLIENT_OK &&
+        status == VPS_CLIENT_OK) status = VPS_CLIENT_BACKEND_ERROR;
+    return status;
+}
+
+static VpsClientStatus vps_async_metadata_probe(
+    VpsClientConnection *connection,
+    const VpsAllocator *allocator,
+    VpsLogger *logger,
+    VpsError *error)
+{
+    static const char default_schema[] = "pg_catalog";
+    static const char default_relation[] = "pg_class";
+    const char *schema = getenv(VPS_ASYNC_ENV_METADATA_SCHEMA);
+    const char *relation_name = getenv(VPS_ASYNC_ENV_METADATA_TABLE);
+    VpsClientParameterView name_parameters[2];
+    VpsClientParameterView oid_parameter;
+    VpsMetadataRowSet relation_rows;
+    VpsMetadataRowSet column_rows;
+    VpsMetadataRowSet key_rows;
+    VpsMetadataRowSet policy_rows;
+    VpsRelationMetadata relation;
+    VpsColumnSet columns;
+    VpsKeyMetadata key;
+    VpsRelationPolicyMetadata policy;
+    VpsTypeRegistry registry;
+    VpsSchemaFingerprintInput fingerprint_input;
+    VpsSchemaFingerprint fingerprint;
+    VpsClientStatus status = VPS_CLIENT_BACKEND_ERROR;
+    char oid[16];
+    int oid_length;
+    const char *metadata_phase = "init";
+    int relation_initialized = 0;
+    int columns_initialized = 0;
+    if (schema == NULL || schema[0] == '\0') schema = default_schema;
+    if (relation_name == NULL || relation_name[0] == '\0')
+        relation_name = default_relation;
+    (void)memset(&relation_rows, 0, sizeof(relation_rows));
+    (void)memset(&column_rows, 0, sizeof(column_rows));
+    (void)memset(&key_rows, 0, sizeof(key_rows));
+    (void)memset(&policy_rows, 0, sizeof(policy_rows));
+    (void)memset(&relation, 0, sizeof(relation));
+    (void)memset(&columns, 0, sizeof(columns));
+    (void)memset(&key, 0, sizeof(key));
+    (void)memset(&policy, 0, sizeof(policy));
+    (void)memset(&fingerprint_input, 0, sizeof(fingerprint_input));
+    (void)memset(name_parameters, 0, sizeof(name_parameters));
+    (void)memset(&oid_parameter, 0, sizeof(oid_parameter));
+    if (strlen(schema) > VPS_METADATA_NAME_MAX_BYTES ||
+        strlen(relation_name) > VPS_METADATA_NAME_MAX_BYTES ||
+        vps_metadata_rowset_init(&relation_rows, allocator, logger) !=
+            VPS_METADATA_OK ||
+        vps_metadata_rowset_init(&column_rows, allocator, logger) !=
+            VPS_METADATA_OK ||
+        vps_metadata_rowset_init(&key_rows, allocator, logger) !=
+            VPS_METADATA_OK ||
+        vps_metadata_rowset_init(&policy_rows, allocator, logger) !=
+            VPS_METADATA_OK)
+        goto cleanup;
+    name_parameters[0].value = schema;
+    name_parameters[0].length = strlen(schema);
+    name_parameters[0].type_oid = VPS_METADATA_NAME_OID;
+    name_parameters[0].format = VPS_CLIENT_VALUE_TEXT;
+    name_parameters[1].value = relation_name;
+    name_parameters[1].length = strlen(relation_name);
+    name_parameters[1].type_oid = VPS_METADATA_NAME_OID;
+    name_parameters[1].format = VPS_CLIENT_VALUE_TEXT;
+    metadata_phase = "relation_query";
+    status = vps_async_catalog_fetch(connection, VPS_CATALOG_QUERY_RELATION,
+                                     name_parameters, 2U, &relation_rows,
+                                     error);
+    if (status != VPS_CLIENT_OK ||
+        vps_relation_metadata_init(&relation, allocator, logger) !=
+            VPS_METADATA_OK)
+        goto cleanup;
+    relation_initialized = 1;
+    metadata_phase = "relation_resolve";
+    if (vps_relation_metadata_resolve(&relation, &relation_rows, schema,
+                                      strlen(schema), relation_name,
+                                      strlen(relation_name)) != VPS_METADATA_OK) {
+        status = VPS_CLIENT_BACKEND_ERROR;
+        goto cleanup;
+    }
+    oid_length = snprintf(oid, sizeof(oid), "%u",
+                          (unsigned int)relation.relation_oid);
+    if (oid_length <= 0 || (size_t)oid_length >= sizeof(oid)) {
+        status = VPS_CLIENT_BACKEND_ERROR;
+        goto cleanup;
+    }
+    oid_parameter.value = oid;
+    oid_parameter.length = (size_t)oid_length;
+    oid_parameter.type_oid = 26U;
+    oid_parameter.format = VPS_CLIENT_VALUE_TEXT;
+    metadata_phase = "columns_query";
+    status = vps_async_catalog_fetch(connection, VPS_CATALOG_QUERY_COLUMNS,
+                                     &oid_parameter, 1U, &column_rows, error);
+    if (status == VPS_CLIENT_OK) {
+        metadata_phase = "keys_query";
+        status = vps_async_catalog_fetch(connection, VPS_CATALOG_QUERY_KEYS,
+                                         &oid_parameter, 1U, &key_rows, error);
+    }
+    if (status == VPS_CLIENT_OK) {
+        metadata_phase = "policy_query";
+        status = vps_async_catalog_fetch(
+            connection, VPS_CATALOG_QUERY_RELATION_POLICY, &oid_parameter,
+            1U, &policy_rows, error);
+    }
+    if (status != VPS_CLIENT_OK ||
+        vps_column_set_init(&columns, allocator, logger) != VPS_METADATA_OK)
+        goto cleanup;
+    columns_initialized = 1;
+    metadata_phase = "columns_build";
+    if (vps_column_set_build(&columns, &column_rows) != VPS_METADATA_OK) {
+        status = VPS_CLIENT_BACKEND_ERROR;
+        goto cleanup;
+    }
+    metadata_phase = "key_discovery";
+    if (vps_key_discover(&key_rows, &columns, NULL, 0U, 0, logger, &key) !=
+        VPS_METADATA_OK) {
+        status = VPS_CLIENT_BACKEND_ERROR;
+        goto cleanup;
+    }
+    metadata_phase = "policy_build";
+    if (vps_relation_policy_build(&relation, &key, &policy_rows, logger,
+                                  &policy) != VPS_METADATA_OK) {
+        status = VPS_CLIENT_BACKEND_ERROR;
+        goto cleanup;
+    }
+    metadata_phase = "registry_init";
+    if (vps_type_registry_init(&registry, logger) != VPS_METADATA_OK) {
+        status = VPS_CLIENT_BACKEND_ERROR;
+        goto cleanup;
+    }
+    fingerprint_input.relation = &relation;
+    fingerprint_input.columns = &columns;
+    fingerprint_input.key = &key;
+    fingerprint_input.policy = &policy;
+    fingerprint_input.type_registry = &registry;
+    fingerprint_input.spatial.metadata_version = 1U;
+    metadata_phase = "fingerprint";
+    if (vps_schema_fingerprint_build(&fingerprint_input, logger,
+                                     &fingerprint) != VPS_METADATA_OK) {
+        status = VPS_CLIENT_BACKEND_ERROR;
+        goto cleanup;
+    }
+    (void)printf(
+        "async_metadata_probe status=ok relation_oid=%u columns=%u key=%s policy=%s fingerprint_version=%u fingerprint=%s\n",
+        (unsigned int)relation.relation_oid,
+        (unsigned int)columns.visible_count, vps_key_source_name(key.source),
+        vps_relation_write_policy_name(policy.write_policy),
+        (unsigned int)fingerprint.version, fingerprint.hex);
+    status = VPS_CLIENT_OK;
+cleanup:
+    if (status != VPS_CLIENT_OK)
+        (void)printf(
+            "async_metadata_probe status=failed phase=%s relation_rows=%u relation_fields=%u column_rows=%u key_rows=%u policy_rows=%u\n",
+            metadata_phase, (unsigned int)relation_rows.row_count,
+            (unsigned int)relation_rows.field_count,
+            (unsigned int)column_rows.row_count,
+            (unsigned int)key_rows.row_count,
+            (unsigned int)policy_rows.row_count);
+    if (columns_initialized) vps_column_set_reset(&columns);
+    if (relation_initialized) vps_relation_metadata_reset(&relation);
+    vps_metadata_rowset_reset(&policy_rows);
+    vps_metadata_rowset_reset(&key_rows);
+    vps_metadata_rowset_reset(&column_rows);
+    vps_metadata_rowset_reset(&relation_rows);
     return status;
 }
 
@@ -568,6 +837,7 @@ int main(void)
     VpsClientStatus connect_status = VPS_CLIENT_INVALID_STATE;
     VpsClientStatus statement_status = VPS_CLIENT_INVALID_STATE;
     VpsClientStatus health_status = VPS_CLIENT_INVALID_STATE;
+    VpsClientStatus metadata_status = VPS_CLIENT_INVALID_STATE;
     VpsClientStatus cancel_status = VPS_CLIENT_INVALID_STATE;
     VpsClientStatus fixture_status = VPS_CLIENT_OK;
     VpsClientStatus network_status = VPS_CLIENT_OK;
@@ -689,12 +959,15 @@ int main(void)
         : VPS_CLIENT_BACKEND_ERROR;
     connection = (VpsClientConnection *)lease.connection;
     if (connect_status == VPS_CLIENT_OK) {
+        metadata_status = vps_async_metadata_probe(connection, &allocator,
+                                                   &logger, &error);
         if (fixture_requested) {
             fixture_status = vps_async_fixture_bootstrap_and_verify(
                 connection, &error);
         }
     }
-    if (connect_status == VPS_CLIENT_OK && fixture_status == VPS_CLIENT_OK) {
+    if (connect_status == VPS_CLIENT_OK &&
+        metadata_status == VPS_CLIENT_OK && fixture_status == VPS_CLIENT_OK) {
         static const char query[] =
             "SELECT $1::pg_catalog.int4 WHERE false";
         static const char parameter_value[] = "7";
@@ -841,6 +1114,7 @@ int main(void)
              statement_status == VPS_CLIENT_OK &&
              cancel_status == VPS_CLIENT_OK &&
              health_status == VPS_CLIENT_OK &&
+             metadata_status == VPS_CLIENT_OK &&
              fixture_status == VPS_CLIENT_OK &&
              network_status == VPS_CLIENT_OK &&
              !log_capture.sensitive_value_seen;
@@ -863,9 +1137,10 @@ cleanup:
     if (passed && api_context.finish_count !=
                       (network_requested ? 2U : 1U)) passed = 0;
     (void)printf(
-        "async_connect_probe status=%s result=%s fixture=%s statement=%s cancel=%s health=%s network=%s error_class=%s sqlstate=%s phase=%s outcome=%s finish_count=%u log_events=%u\n",
+        "async_connect_probe status=%s result=%s metadata=%s fixture=%s statement=%s cancel=%s health=%s network=%s error_class=%s sqlstate=%s phase=%s outcome=%s finish_count=%u log_events=%u\n",
         passed ? "passed" : "failed",
         vps_client_status_name(connect_status),
+        vps_client_status_name(metadata_status),
         vps_client_status_name(fixture_status),
         vps_client_status_name(statement_status),
         vps_client_status_name(cancel_status),

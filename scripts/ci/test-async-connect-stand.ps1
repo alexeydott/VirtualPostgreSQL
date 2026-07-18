@@ -65,6 +65,16 @@ try {
             [EnvironmentVariableTarget]::Process)
         $temporaryNames.Add('VPS_ASYNC_TEST_NETWORK_LOSS')
     }
+    foreach ($suffix in @('METADATA_SCHEMA', 'METADATA_TABLE')) {
+        $value = [Environment]::GetEnvironmentVariable(
+            "${prefix}_${suffix}", [EnvironmentVariableTarget]::Process)
+        if (-not [string]::IsNullOrEmpty($value)) {
+            $targetName = "VPS_ASYNC_TEST_${suffix}"
+            [Environment]::SetEnvironmentVariable(
+                $targetName, $value, [EnvironmentVariableTarget]::Process)
+            $temporaryNames.Add($targetName)
+        }
+    }
 
     $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
     $buildCandidate = [IO.Path]::GetFullPath((Join-Path $root $BuildDirectory))

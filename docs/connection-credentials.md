@@ -1,3 +1,5 @@
+[Back to README](../README.md) · [Next: Client runtime →](client-runtime.md)
+
 # Connection credential modes
 
 VirtualPostgreSQL accepts exactly one connection credential mode per virtual
@@ -109,3 +111,8 @@ queries, and reads connection details only from process-local
 `VPS_SESSION_TEST_*` environment variables. Explicit no-SSL evidence must run
 with `VPS_SESSION_TEST_SSLMODE=disable`; a TLS run proves the same session
 contract but does not replace that no-SSL gate.
+
+## See Also
+
+- [Client runtime](client-runtime.md) — async connection and cancellation contract.
+- [Table metadata](table-metadata.md) — catalog access after session setup.

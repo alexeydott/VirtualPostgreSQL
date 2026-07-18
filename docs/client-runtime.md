@@ -1,3 +1,5 @@
+[← Previous: Connection credentials](connection-credentials.md) · [Back to README](../README.md) · [Next: Table metadata →](table-metadata.md)
+
 # Client runtime capabilities
 
 VirtualPostgreSQL pins static libpq 18.4. The production adapter exposes only
@@ -34,3 +36,8 @@ Raw statement SQL is present only in compile-time `VPS_DEBUG` builds and only
 in `debug` events. Release and RelWithDebInfo builds reject the SQL field even
 when runtime log level is `debug`. Parameter values remain excluded in every
 build configuration.
+
+## See Also
+
+- [Connection credentials](connection-credentials.md) — identity, TLS and baseline policy.
+- [Table metadata](table-metadata.md) — async catalog statements and snapshot ownership.

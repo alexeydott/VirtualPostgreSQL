@@ -18,7 +18,7 @@ static int vps_log_event_level_is_valid(VpsLogLevel level)
 static int vps_log_field_key_is_valid(VpsLogFieldKey key)
 {
     return key >= VPS_LOG_FIELD_OPERATION &&
-           key <= VPS_LOG_FIELD_SQL_TEXT;
+           key <= VPS_LOG_FIELD_FORMAT_VERSION;
 }
 
 static int vps_log_field_requires_string(VpsLogFieldKey key)
@@ -44,6 +44,7 @@ static int vps_log_field_requires_string(VpsLogFieldKey key)
     case VPS_LOG_FIELD_PARAMETER:
     case VPS_LOG_FIELD_EXPECTED_CLASS:
     case VPS_LOG_FIELD_PRIMARY_MESSAGE:
+    case VPS_LOG_FIELD_CHANGE_CLASS:
 #if defined(VPS_DEBUG)
     case VPS_LOG_FIELD_SQL_TEXT:
 #endif
@@ -74,6 +75,14 @@ static int vps_log_field_requires_uint64(VpsLogFieldKey key)
     case VPS_LOG_FIELD_RESULT_FIELD_COUNT:
     case VPS_LOG_FIELD_RETRY_ATTEMPT:
     case VPS_LOG_FIELD_BACKOFF_MS:
+    case VPS_LOG_FIELD_TYPE_OID:
+    case VPS_LOG_FIELD_RELATION_OID:
+    case VPS_LOG_FIELD_NAMESPACE_OID:
+    case VPS_LOG_FIELD_INDEX_OID:
+    case VPS_LOG_FIELD_CODEC_ID:
+    case VPS_LOG_FIELD_KEY_COUNT:
+    case VPS_LOG_FIELD_FLAGS:
+    case VPS_LOG_FIELD_FORMAT_VERSION:
         return 1;
     default:
         return 0;
@@ -566,7 +575,10 @@ const char *vps_log_field_name(VpsLogFieldKey key)
         "configuration_generation", "tls_mode", "ssl_in_use",
         "certificate_status", "channel_binding_status", "parameter",
         "expected_class", "poll_count", "wait_count", "parameter_count",
-        "result_field_count", "retry_attempt", "backoff_ms"};
+        "result_field_count", "retry_attempt", "backoff_ms",
+        "primary_message", "sql_text", "type_oid", "relation_oid",
+        "namespace_oid", "index_oid", "codec_id", "key_count", "flags",
+        "change_class", "format_version"};
 
     if (!vps_log_field_key_is_valid(key)) {
         return "unknown";
