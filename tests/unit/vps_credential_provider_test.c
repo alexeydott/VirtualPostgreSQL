@@ -297,9 +297,10 @@ static int vps_test_registration_and_abi(void)
                              VPS_CREDENTIAL_REGISTRY_ABI_INCOMPATIBLE,
                          "short_provider_rejected");
     passed &= vps_expect(vps_credential_registry_cleanup(&registry) ==
-                             VPS_CREDENTIAL_REGISTRY_OK &&
-                             vps_credential_registry_cleanup(&registry) ==
-                                 VPS_CREDENTIAL_REGISTRY_OK,
+                             VPS_CREDENTIAL_REGISTRY_OK,
+                         "registry_cleanup");
+    passed &= vps_expect(vps_credential_registry_cleanup(&registry) ==
+                             VPS_CREDENTIAL_REGISTRY_OK,
                          "registry_cleanup_repeat");
     return passed;
 }
@@ -359,9 +360,10 @@ static int vps_test_resolve_copy_release_and_logging(void)
                              log_state.last_generation == 1U,
                          "structured_logs_are_value_free");
     passed &= vps_expect(vps_resolved_credential_cleanup(&resolved) ==
+                             VPS_CREDENTIAL_REGISTRY_OK,
+                         "resolved_cleanup");
+    passed &= vps_expect(vps_resolved_credential_cleanup(&resolved) ==
                              VPS_CREDENTIAL_REGISTRY_OK &&
-                             vps_resolved_credential_cleanup(&resolved) ==
-                                 VPS_CREDENTIAL_REGISTRY_OK &&
                              wipe_state.deallocate_count == 1U &&
                              !wipe_state.nonzero_byte_seen,
                          "resolved_cleanup_repeat");

@@ -98,7 +98,8 @@ static int test_rowset_copy_and_atomicity(void)
                    rowset.field_count == spec.result_field_count &&
                    vps_metadata_rowset_cell(&rowset, 0U, 0U, &value, &length,
                                             &is_null) == VPS_METADATA_OK &&
-                   !is_null && length == 1U && value[0] == '1' &&
+                   !is_null && value != NULL && length == 1U &&
+                   value[0] == '1' &&
                    vps_metadata_rowset_cell(&rowset, 0U, 3U, &value, &length,
                                             &is_null) == VPS_METADATA_OK &&
                    is_null && value == NULL && length == 0U,

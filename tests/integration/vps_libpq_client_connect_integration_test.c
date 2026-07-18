@@ -21,6 +21,8 @@
 #define VPS_ASYNC_ENV_NETWORK_LOSS "VPS_ASYNC_TEST_NETWORK_LOSS"
 #define VPS_ASYNC_ENV_METADATA_SCHEMA "VPS_ASYNC_TEST_METADATA_SCHEMA"
 #define VPS_ASYNC_ENV_METADATA_TABLE "VPS_ASYNC_TEST_METADATA_TABLE"
+#define VPS_ASYNC_ENV_PERFORMANCE "VPS_ASYNC_TEST_PERFORMANCE"
+#define VPS_ASYNC_PERFORMANCE_WARM_ITERATIONS 100U
 
 typedef struct VpsAsyncEnvironment {
     const char *host;
@@ -608,7 +610,8 @@ static VpsClientStatus vps_async_fixture_bootstrap_and_verify(
                      (int)column.length, (const char *)column.data, expected);
     }
     if (status == VPS_CLIENT_OK &&
-        (column.is_null || column.length != sizeof(expected) - 1U ||
+        (column.is_null || column.data == NULL ||
+         column.length != sizeof(expected) - 1U ||
          memcmp(column.data, expected, sizeof(expected) - 1U) != 0)) {
         status = VPS_CLIENT_BACKEND_ERROR;
     }
@@ -881,6 +884,9 @@ int main(void)
     int passed = 0;
     int fixture_requested = 0;
     int network_requested = 0;
+    int performance_requested = 0;
+    uint64_t cold_connect_ms = 0U;
+    uint64_t warm_pool_ms = 0U;
     VpsErrorClass final_error_class = VPS_ERROR_CLASS_NONE;
     char final_sqlstate[6] = {0};
     if (!vps_async_environment(&environment)) {
@@ -891,7 +897,9 @@ int main(void)
     fixture_requested = getenv(VPS_ASYNC_ENV_FIXTURE) != NULL &&
                         strcmp(getenv(VPS_ASYNC_ENV_FIXTURE), "1") == 0;
     network_requested = getenv(VPS_ASYNC_ENV_NETWORK_LOSS) != NULL &&
-                        strcmp(getenv(VPS_ASYNC_ENV_NETWORK_LOSS), "1") == 0;
+                         strcmp(getenv(VPS_ASYNC_ENV_NETWORK_LOSS), "1") == 0;
+    performance_requested = getenv(VPS_ASYNC_ENV_PERFORMANCE) != NULL &&
+                            strcmp(getenv(VPS_ASYNC_ENV_PERFORMANCE), "1") == 0;
     if (fixture_requested) fixture_status = VPS_CLIENT_INVALID_STATE;
     (void)memset(&log_capture, 0, sizeof(log_capture));
     (void)memset(&api_context, 0, sizeof(api_context));
@@ -975,6 +983,12 @@ int main(void)
     pool_config.maximum_waiters = 1U;
     pool_config.wait_slice_ms = 50U;
     pool_config.idle_validation_ms = 0U;
+    {
+        uint64_t connect_started = 0U;
+        uint64_t connect_finished = 0U;
+        if (vps_platform_monotonic_now_ms(
+                vps_platform_current_operations(), &connect_started) !=
+            VPS_PLATFORM_OK) goto cleanup;
     connect_status =
         vps_connection_pool_create(&pool_config, &pool) ==
                 VPS_CONNECTION_POOL_OK &&
@@ -982,7 +996,48 @@ int main(void)
                                         &lease) == VPS_CONNECTION_POOL_OK
         ? VPS_CLIENT_OK
         : VPS_CLIENT_BACKEND_ERROR;
+        if (vps_platform_monotonic_now_ms(
+                vps_platform_current_operations(), &connect_finished) !=
+            VPS_PLATFORM_OK) goto cleanup;
+        cold_connect_ms = connect_finished - connect_started;
+    }
     connection = (VpsClientConnection *)lease.connection;
+    if (connect_status == VPS_CLIENT_OK && performance_requested) {
+        uint64_t warm_started = 0U;
+        uint64_t warm_finished = 0U;
+        unsigned int iteration;
+        if (vps_platform_monotonic_now_ms(
+                vps_platform_current_operations(), &warm_started) !=
+            VPS_PLATFORM_OK) goto cleanup;
+        for (iteration = 0U;
+             iteration < VPS_ASYNC_PERFORMANCE_WARM_ITERATIONS; ++iteration) {
+            if (vps_connection_lease_release(
+                    &lease, VPS_CONNECTION_LEASE_CLEAN) !=
+                    VPS_CONNECTION_POOL_OK ||
+                vps_connection_pool_acquire(
+                    pool, &pool_key, 10000U, NULL, NULL, &lease) !=
+                    VPS_CONNECTION_POOL_OK ||
+                lease.connection != connection) {
+                connect_status = VPS_CLIENT_BACKEND_ERROR;
+                break;
+            }
+        }
+        if (vps_platform_monotonic_now_ms(
+                vps_platform_current_operations(), &warm_finished) !=
+            VPS_PLATFORM_OK) goto cleanup;
+        warm_pool_ms = warm_finished - warm_started;
+        if (cold_connect_ms == 0U || cold_connect_ms > 5000U ||
+            warm_pool_ms >= cold_connect_ms *
+                                VPS_ASYNC_PERFORMANCE_WARM_ITERATIONS) {
+            connect_status = VPS_CLIENT_BACKEND_ERROR;
+        }
+        (void)printf(
+            "connection_performance cold_ms=%llu warm_total_ms=%llu warm_iterations=%u status=%s\n",
+            (unsigned long long)cold_connect_ms,
+            (unsigned long long)warm_pool_ms,
+            VPS_ASYNC_PERFORMANCE_WARM_ITERATIONS,
+            connect_status == VPS_CLIENT_OK ? "passed" : "failed");
+    }
     if (connect_status == VPS_CLIENT_OK) {
         metadata_status = vps_async_metadata_probe(connection, &allocator,
                                                    &logger, &error);

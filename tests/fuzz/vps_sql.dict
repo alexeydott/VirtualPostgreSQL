@@ -1,0 +1,6 @@
+select="SELECT"
+from="FROM"
+where="WHERE"
+index_sep=";"
+assign="="
+quote="'"

@@ -183,8 +183,8 @@ static void *fake_connect_start(void *context,
     FakeApi *fake = (FakeApi *)context;
     size_t keyword_count = 0U;
     fake->start_count += 1U;
-    while (keywords[keyword_count] != NULL &&
-           keyword_count < VPS_LIBPQ_CLIENT_MAX_KEYWORDS) {
+    while (keyword_count < VPS_LIBPQ_CLIENT_MAX_KEYWORDS &&
+           keywords[keyword_count] != NULL) {
         keyword_count += 1U;
     }
     fake->keyword_view_valid =
@@ -1088,8 +1088,9 @@ static int test_success_and_socket_replacement(void)
                "success_readiness_order");
     TEST_CHECK(fixture.log_count > 0U && !fixture.forbidden_seen,
                "success_redaction");
+    TEST_CHECK(vps_client_connection_close(&connection) == VPS_CLIENT_OK,
+               "success_close");
     TEST_CHECK(vps_client_connection_close(&connection) == VPS_CLIENT_OK &&
-                   vps_client_connection_close(&connection) == VPS_CLIENT_OK &&
                    fixture.fake.finish_count == 1U &&
                    test_fixture_cleanup(&fixture),
                "success_cleanup");

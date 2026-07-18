@@ -144,6 +144,7 @@ static int vps_test_allocator_contract(void)
     passed &= vps_expect(vps_memory_reallocate(&allocator, &memory, 4U, 8U) ==
                              VPS_MEMORY_OUT_OF_MEMORY &&
                              memory == preserved &&
+                             memory != NULL &&
                              memcmp(memory, "abc", 4U) == 0,
                          "failed_resize_preserves_owner");
     state.reject_reallocate = 0;

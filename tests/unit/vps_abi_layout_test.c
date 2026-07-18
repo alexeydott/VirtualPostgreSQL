@@ -5,6 +5,31 @@
 #include <stddef.h>
 #include <stdio.h>
 
+_Static_assert(sizeof(VpsAbiHeader) == 16U, "VpsAbiHeader ABI 1.0 size");
+#if UINTPTR_MAX == UINT32_MAX
+_Static_assert(sizeof(VpsCredentialConfig) == 112U,
+               "VpsCredentialConfig Win32 ABI 1.0 size");
+_Static_assert(sizeof(VpsCredentialLease) == 40U,
+               "VpsCredentialLease Win32 ABI 1.0 size");
+_Static_assert(sizeof(VpsCredentialProvider) == 48U,
+               "VpsCredentialProvider Win32 ABI 1.0 size");
+#elif UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(VpsCredentialConfig) == 200U,
+               "VpsCredentialConfig x64 ABI 1.0 size");
+_Static_assert(sizeof(VpsCredentialLease) == 64U,
+               "VpsCredentialLease x64 ABI 1.0 size");
+_Static_assert(sizeof(VpsCredentialProvider) == 72U,
+               "VpsCredentialProvider x64 ABI 1.0 size");
+#else
+#error Unsupported Windows 1.0 pointer width
+#endif
+_Static_assert(offsetof(VpsCredentialConfig, header) == 0U,
+               "VpsCredentialConfig ABI header prefix");
+_Static_assert(offsetof(VpsCredentialLease, header) == 0U,
+               "VpsCredentialLease ABI header prefix");
+_Static_assert(offsetof(VpsCredentialProvider, header) == 0U,
+               "VpsCredentialProvider ABI header prefix");
+
 static int vps_expect(int condition, const char *check_name)
 {
     if (!condition) {
@@ -23,15 +48,19 @@ int main(void)
         UINT64_C(0)
     };
     uint32_t incompatible_version = VPS_API_VERSION_ENCODE(2, 0, 0);
+    volatile size_t pointer_size = sizeof(void *);
+    volatile size_t config_header_offset = offsetof(VpsCredentialConfig, header);
+    volatile size_t lease_header_offset = offsetof(VpsCredentialLease, header);
+    volatile size_t provider_header_offset = offsetof(VpsCredentialProvider, header);
     int passed = 1;
 
-    passed &= vps_expect(sizeof(void *) == 4 || sizeof(void *) == 8,
+    passed &= vps_expect(pointer_size == 4U || pointer_size == 8U,
                          "supported_pointer_width");
-    passed &= vps_expect(offsetof(VpsCredentialConfig, header) == 0,
+    passed &= vps_expect(config_header_offset == 0U,
                          "config_header_prefix");
-    passed &= vps_expect(offsetof(VpsCredentialLease, header) == 0,
+    passed &= vps_expect(lease_header_offset == 0U,
                          "lease_header_prefix");
-    passed &= vps_expect(offsetof(VpsCredentialProvider, header) == 0,
+    passed &= vps_expect(provider_header_offset == 0U,
                          "provider_header_prefix");
     passed &= vps_expect(virtualpostgresql_api_version() == VPS_API_VERSION,
                          "api_version_function");

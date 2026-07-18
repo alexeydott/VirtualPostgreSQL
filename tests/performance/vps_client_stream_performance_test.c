@@ -3,6 +3,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <psapi.h>
+#endif
 
 #define VPS_STREAM_TEST_ROWS UINT64_C(1000000)
 
@@ -13,6 +18,20 @@ typedef struct StreamBackend {
     uint64_t release_count;
     VpsClientOperation operation;
 } StreamBackend;
+
+static size_t stream_working_set_bytes(void)
+{
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters;
+    (void)memset(&counters, 0, sizeof(counters));
+    counters.cb = sizeof(counters);
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &counters,
+                             sizeof(counters)) != 0) {
+        return (size_t)counters.WorkingSetSize;
+    }
+#endif
+    return 0U;
+}
 
 static VpsClientStatus stream_connection_create(void *context, void **handle,
                                                  VpsError *error)
@@ -111,6 +130,8 @@ int main(void)
     VpsClientResultFieldExpectation field={23U,VPS_CLIENT_VALUE_TEXT};
     uint64_t index;
     size_t stable_allocations;
+    size_t rss_before;
+    size_t rss_after;
     clock_t started;
     clock_t first_row_at = 0;
     (void)memset(&backend,0,sizeof(backend));
@@ -148,6 +169,7 @@ int main(void)
         vps_client_statement_start(statement,VPS_CLIENT_OPERATION_EXECUTE,NULL)!=VPS_CLIENT_OK ||
         vps_client_statement_poll(statement,&poll,NULL)!=VPS_CLIENT_OK) return 1;
     stable_allocations=fault.active_allocations;
+    rss_before=stream_working_set_bytes();
     started=clock();
     for(index=0U;index<VPS_STREAM_TEST_ROWS;++index){
         const VpsClientRowView *row=NULL; VpsClientColumnView column;
@@ -167,9 +189,13 @@ int main(void)
        vps_client_statement_close(&statement)!=VPS_CLIENT_OK ||
        vps_client_connection_close(&connection)!=VPS_CLIENT_OK ||
        vps_client_cleanup(&client)!=VPS_CLIENT_OK || fault.active_allocations!=0U) return 1;
-    (void)printf("client_stream rows=%u stable_allocations=%u first_row_ticks=%lld total_ticks=%lld status=passed\n",
+    rss_after=stream_working_set_bytes();
+    if (rss_after > rss_before + 64U * 1024U * 1024U) return 1;
+    (void)printf("client_stream rows=%u stable_allocations=%u rss_delta_bytes=%llu first_row_ticks=%lld total_ticks=%lld status=passed\n",
                  (unsigned int)VPS_STREAM_TEST_ROWS,
                  (unsigned int)stable_allocations,
+                 (unsigned long long)(rss_after > rss_before
+                     ? rss_after - rss_before : 0U),
                  (long long)(first_row_at-started),
                  (long long)(clock()-started));
     return 0;

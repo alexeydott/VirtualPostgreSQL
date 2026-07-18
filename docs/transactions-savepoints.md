@@ -1,3 +1,5 @@
+[← Previous: DML and identity](dml-identity.md) · [Back to README](../README.md) · [Next: Spatial →](spatial.md)
+
 # Transactions and savepoints
 
 VirtualPostgreSQL maps SQLite transaction callbacks to one PostgreSQL
@@ -58,3 +60,9 @@ The host must reconcile externally before repeating business work:
 VirtualPostgreSQL provides no distributed transaction coordinator and makes no
 atomicity claim across different PostgreSQL identities or ordinary SQLite
 tables.
+
+## See Also
+
+- [DML and identity](dml-identity.md) — keyed write semantics.
+- [Troubleshooting](troubleshooting.md) — ambiguous COMMIT response.
+- [Security](security.md) — least-privilege transaction role.

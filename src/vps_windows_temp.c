@@ -32,15 +32,18 @@ VpsTempFileStatus vps_temp_file_create_private(
     VpsTempFilePath *path)
 {
     PWSTR local = NULL;
-    wchar_t root[VPS_TEMP_FILE_PATH_LIMIT];
-    wchar_t directory[VPS_TEMP_FILE_PATH_LIMIT];
-    wchar_t file[VPS_TEMP_FILE_PATH_LIMIT];
+    wchar_t *path_storage = NULL;
+    wchar_t *root = NULL;
+    wchar_t *directory = NULL;
+    wchar_t *file = NULL;
     PSECURITY_DESCRIPTOR descriptor = NULL;
     SECURITY_ATTRIBUTES attributes;
     HANDLE handle = INVALID_HANDLE_VALUE;
     GUID id;
     int utf8_size;
-    size_t allocation_size;
+    size_t allocation_size = 0U;
+    char *utf8_path = NULL;
+    VpsTempFileStatus result = VPS_TEMP_FILE_SYSTEM_ERROR;
     (void)logger;
     if (allocator == NULL || !vps_allocator_is_valid(allocator) ||
         path == NULL || path->path != NULL)
@@ -48,6 +51,16 @@ VpsTempFileStatus vps_temp_file_create_private(
     if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData,
                                     KF_FLAG_CREATE, NULL, &local)))
         return VPS_TEMP_FILE_SYSTEM_ERROR;
+    path_storage = (wchar_t *)HeapAlloc(
+        GetProcessHeap(), HEAP_ZERO_MEMORY,
+        3U * VPS_TEMP_FILE_PATH_LIMIT * sizeof(*path_storage));
+    if (path_storage == NULL) {
+        CoTaskMemFree(local);
+        return VPS_TEMP_FILE_OUT_OF_MEMORY;
+    }
+    root = path_storage;
+    directory = root + VPS_TEMP_FILE_PATH_LIMIT;
+    file = directory + VPS_TEMP_FILE_PATH_LIMIT;
     if (swprintf(root, VPS_TEMP_FILE_PATH_LIMIT, L"%ls\\VirtualPostgreSQL",
                  local) < 0 ||
         swprintf(directory, VPS_TEMP_FILE_PATH_LIMIT, L"%ls\\Temp", root) < 0 ||
@@ -58,13 +71,13 @@ VpsTempFileStatus vps_temp_file_create_private(
                  directory, (unsigned long)id.Data1, id.Data2, id.Data3,
                  id.Data4[0], id.Data4[1], id.Data4[2], id.Data4[3],
                  id.Data4[4], id.Data4[5], id.Data4[6], id.Data4[7]) < 0) {
-        CoTaskMemFree(local);
-        return VPS_TEMP_FILE_SYSTEM_ERROR;
+        goto cleanup;
     }
     CoTaskMemFree(local);
+    local = NULL;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
             L"D:P(A;;FA;;;OW)", SDDL_REVISION_1, &descriptor, NULL))
-        return VPS_TEMP_FILE_SYSTEM_ERROR;
+        goto cleanup;
     attributes.nLength = sizeof(attributes);
     attributes.lpSecurityDescriptor = descriptor;
     attributes.bInheritHandle = FALSE;
@@ -73,27 +86,42 @@ VpsTempFileStatus vps_temp_file_create_private(
                                          FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
                          NULL);
     LocalFree(descriptor);
-    if (handle == INVALID_HANDLE_VALUE) return VPS_TEMP_FILE_SYSTEM_ERROR;
+    descriptor = NULL;
+    if (handle == INVALID_HANDLE_VALUE) goto cleanup;
     (void)CloseHandle(handle);
+    handle = INVALID_HANDLE_VALUE;
     utf8_size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, file, -1,
                                     NULL, 0, NULL, NULL);
     if (utf8_size <= 0 ||
         vps_size_from_int64(utf8_size, &allocation_size) != VPS_MEMORY_OK ||
         vps_memory_allocate(allocator, allocation_size,
-                            (void **)&path->path) != VPS_MEMORY_OK) {
+                            (void **)&utf8_path) != VPS_MEMORY_OK ||
+        utf8_path == NULL) {
         (void)DeleteFileW(file);
-        return VPS_TEMP_FILE_OUT_OF_MEMORY;
+        result = VPS_TEMP_FILE_OUT_OF_MEMORY;
+        goto cleanup;
     }
     if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, file, -1,
-                            path->path, utf8_size, NULL, NULL) != utf8_size) {
+                            utf8_path, utf8_size, NULL, NULL) != utf8_size) {
         (void)DeleteFileW(file);
-        vps_memory_release(allocator, (void **)&path->path, allocation_size);
-        return VPS_TEMP_FILE_SYSTEM_ERROR;
+        vps_memory_release(allocator, (void **)&utf8_path, allocation_size);
+        goto cleanup;
     }
+    path->path = utf8_path;
+    utf8_path = NULL;
     path->allocator = *allocator;
     path->path_size = allocation_size;
     path->fingerprint = vps_temp_hash(path->path, allocation_size - 1U);
-    return VPS_TEMP_FILE_OK;
+    result = VPS_TEMP_FILE_OK;
+
+cleanup:
+    if (handle != INVALID_HANDLE_VALUE) (void)CloseHandle(handle);
+    if (descriptor != NULL) LocalFree(descriptor);
+    if (local != NULL) CoTaskMemFree(local);
+    (void)HeapFree(GetProcessHeap(), 0, path_storage);
+    if (utf8_path != NULL)
+        vps_memory_release(allocator, (void **)&utf8_path, allocation_size);
+    return result;
 }
 
 VpsTempFileStatus vps_temp_file_delete(VpsTempFilePath *path)

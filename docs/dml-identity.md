@@ -1,3 +1,5 @@
+[← Previous: Streaming and cancellation](streaming-cancellation.md) · [Back to README](../README.md) · [Next: Transactions →](transactions-savepoints.md)
+
 # DML and stable identity
 
 Table sources may opt into keyed writes with `mode=rw`. Query sources, views,
@@ -47,3 +49,9 @@ across dump/restore, and is not claimed to be a globally unique transaction ID.
 Keyed DML accepts exactly one RETURNING row and exactly one parsed
 `PQcmdTuples` affected row. Zero rows under optimistic locking are conflicts;
 more than one row is an invariant failure. DML is never retried automatically.
+
+## See Also
+
+- [Transactions](transactions-savepoints.md) — pinned connection lifecycle.
+- [Type mapping](type-mapping.md) — DML parameter codecs.
+- [Spatial](spatial.md) — geometry/geography write policy.

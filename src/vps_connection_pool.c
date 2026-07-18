@@ -274,6 +274,7 @@ VpsConnectionPoolResult vps_connection_pool_create(
                             (void **)&pool) != VPS_MEMORY_OK) {
         return VPS_CONNECTION_POOL_OUT_OF_MEMORY;
     }
+    if (pool == NULL) return VPS_CONNECTION_POOL_OUT_OF_MEMORY;
     (void)memset(pool, 0, sizeof(*pool));
     pool->allocator = config->allocator;
     pool->platform = config->platform;
@@ -324,29 +325,27 @@ VpsConnectionPoolResult vps_connection_pool_create(
     return VPS_CONNECTION_POOL_OK;
 
 fail:
-    if (pool != NULL) {
-        while (pool->total > 0U) {
-            for (index = 0U; index < pool->maximum_size; ++index) {
-                if (pool->slots != NULL &&
-                    pool->slots[index].connection != NULL) {
-                    vps_pool_destroy_slot(pool, index);
-                }
+    while (pool->total > 0U) {
+        for (index = 0U; index < pool->maximum_size; ++index) {
+            if (pool->slots != NULL &&
+                pool->slots[index].connection != NULL) {
+                vps_pool_destroy_slot(pool, index);
             }
         }
-        if (pool->condition_initialized) {
-            (void)vps_platform_condition_destroy(pool->platform,
-                                                 &pool->condition);
-        }
-        if (pool->mutex_initialized) {
-            (void)vps_platform_mutex_destroy(pool->platform, &pool->mutex);
-        }
-        vps_memory_release(&pool->allocator, (void **)&pool->identity,
-                           pool->identity_size);
-        vps_memory_release(&pool->allocator, (void **)&pool->waiters,
-                           waiters_size);
-        vps_memory_release(&pool->allocator, (void **)&pool->slots, slots_size);
-        vps_memory_release(&pool->allocator, (void **)&pool, sizeof(*pool));
     }
+    if (pool->condition_initialized) {
+        (void)vps_platform_condition_destroy(pool->platform,
+                                             &pool->condition);
+    }
+    if (pool->mutex_initialized) {
+        (void)vps_platform_mutex_destroy(pool->platform, &pool->mutex);
+    }
+    vps_memory_release(&pool->allocator, (void **)&pool->identity,
+                       pool->identity_size);
+    vps_memory_release(&pool->allocator, (void **)&pool->waiters,
+                       waiters_size);
+    vps_memory_release(&pool->allocator, (void **)&pool->slots, slots_size);
+    vps_memory_release(&pool->allocator, (void **)&pool, sizeof(*pool));
     return result;
 }
 

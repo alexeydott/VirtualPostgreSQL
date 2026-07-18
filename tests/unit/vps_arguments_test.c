@@ -168,8 +168,9 @@ static int test_valid_table_and_types(void)
                               VPS_ARGUMENT_ID_TRANSACTION_READ_ONLY);
     TEST_CHECK(value != NULL && value->boolean_value,
                "transaction_read_only");
+    TEST_CHECK(vps_arguments_reset(&arguments) == VPS_ARGUMENTS_OK,
+               "valid_reset");
     TEST_CHECK(vps_arguments_reset(&arguments) == VPS_ARGUMENTS_OK &&
-                   vps_arguments_reset(&arguments) == VPS_ARGUMENTS_OK &&
                    platform_state.zero_calls == 1U,
                "valid_repeated_reset");
     return 1;

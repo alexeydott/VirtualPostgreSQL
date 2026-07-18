@@ -114,7 +114,7 @@ int main(void)
 #if defined(_WIN32)
     {
         AcquireThread threads[2];
-        HANDLE handles[2];
+        HANDLE handles[2] = {NULL, NULL};
         size_t index;
         CHECK(vps_query_cache_create(&config, &cache) == VPS_QUERY_CACHE_OK);
         (void)memset(&context, 0, sizeof(context));
@@ -126,7 +126,7 @@ int main(void)
             threads[index].build = &context;
             handles[index] = CreateThread(NULL, 0U, acquire_thread,
                                           &threads[index], 0U, NULL);
-            CHECK(handles[index] != NULL);
+            if (handles[index] == NULL) return 1;
         }
         CHECK(WaitForMultipleObjects(2U, handles, TRUE, 5000U) ==
               WAIT_OBJECT_0);

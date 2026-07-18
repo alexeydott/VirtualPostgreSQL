@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('msvc-x86-debug', 'msvc-x64-release', 'clang-cl-x64-debug', 'clang-cl-x64-asan')]
+    [ValidateSet('msvc-x86-debug', 'msvc-x64-release', 'clang-cl-x64-debug', 'clang-cl-x64-asan', 'clang-cl-x64-ubsan',
+                 'msvc-x86-static-analysis', 'msvc-x64-static-analysis',
+                 'clang-tidy-x64-static-analysis')]
     [string]$Preset = 'msvc-x64-release',
     [string]$VisualStudioRoot = 'D:\Visual Studio2022'
 )
@@ -8,7 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$isX86 = $Preset -eq 'msvc-x86-debug'
+$isX86 = $Preset -in @('msvc-x86-debug', 'msvc-x86-static-analysis')
 $isClang = $Preset -like 'clang-cl-*'
 $architecture = if ($isX86) { 'x86' } else { 'x64' }
 $vcvarsName = if ($isX86) { 'vcvars32.bat' } else { 'vcvars64.bat' }

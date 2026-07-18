@@ -433,7 +433,7 @@ VpsCredentialRegistryResult vps_credential_registry_resolve(
     if (vps_abi_validate_header(
             &lease.header,
             (uint32_t)(offsetof(VpsCredentialLease, config) +
-                       sizeof(lease.config)),
+                       sizeof(VpsCredentialConfig *)),
             VPS_API_VERSION) != VPS_ABI_VALID ||
         (lease.header.present_fields != 0U &&
          (lease.header.present_fields & VPS_CREDENTIAL_LEASE_FIELD_CONFIG) ==

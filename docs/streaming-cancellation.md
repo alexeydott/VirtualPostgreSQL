@@ -1,4 +1,4 @@
-[← Previous: Planner and pushdown](planner-pushdown.md) · [Back to README](../README.md)
+[← Previous: Planner and pushdown](planner-pushdown.md) · [Back to README](../README.md) · [Next: DML and identity →](dml-identity.md)
 
 # Streaming, cancellation and concurrency
 
@@ -50,3 +50,9 @@ The TLS stand is deliberately compact. It creates three idempotent control rows
 and their indexes, validates them through the async adapter and read-only virtual
 table, and does not run the bulk stream or cursor-cycle matrix. All credentials
 are process-local environment variables; scripts never persist or print them.
+
+## See Also
+
+- [Client runtime](client-runtime.md) — async adapter capabilities.
+- [Planner](planner-pushdown.md) — compiled execution plan.
+- [DML and identity](dml-identity.md) — write-side ownership.

@@ -320,9 +320,10 @@ static int vps_test_found_registry_and_zero(void)
                              vps_credential_registry_cleanup(&registry) ==
                                  VPS_CREDENTIAL_REGISTRY_OK &&
                              vps_wincred_provider_cleanup(&context) ==
-                                 VPS_CREDENTIAL_REGISTRY_OK &&
-                             vps_wincred_provider_cleanup(&context) ==
                                  VPS_CREDENTIAL_REGISTRY_OK,
+                         "found_cleanup");
+    passed &= vps_expect(vps_wincred_provider_cleanup(&context) ==
+                             VPS_CREDENTIAL_REGISTRY_OK,
                          "found_cleanup_repeat");
     passed &= vps_expect(wipe.deallocate_count == 3U &&
                              !wipe.nonzero_byte_seen,

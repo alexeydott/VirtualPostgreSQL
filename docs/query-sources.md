@@ -1,3 +1,5 @@
+[← Previous: Type mapping](type-mapping.md) · [Back to README](../README.md) · [Next: Read-only Virtual Table →](read-only-vtable.md)
+
 # Query sources
 
 Query source отображает результат одного `SELECT` или `WITH ... SELECT` как read-only virtual table. Inline query проходит bounded lexical scanner, затем PostgreSQL prepare/describe внешнего wrapper. В production предпочтителен versioned `query_profile`, разрешаемый host/protected-config/environment/named-registry provider.
@@ -37,3 +39,9 @@ Query fingerprint включает normalized query hash/profile version, ordere
 Subsequent cursors получают refcounted lease и выполняют exact predicates, projection, compatible ordering и consumed limit/offset локально. `query_indexes` никогда не создаёт unique claim: `SQLITE_INDEX_SCAN_UNIQUE` по-прежнему допускается только для полностью constrained validated `key_columns`. Для обновления snapshot virtual table нужно disconnect/reconnect или recreate; скрытого refresh нет.
 
 Stage gate измеряет минимум 3 samples по 100 probes: remote executions должны сокращаться с `N` до `1`, physical local index подтверждается private `EXPLAIN QUERY PLAN`, а p50 должен улучшаться минимум на 10%. Bulk/equivalence/performance contour выполняется на локальном no-SSL стенде; quota-limited TLS stand не используется для bulk data.
+
+## See Also
+
+- [Read-only Virtual Table](read-only-vtable.md) — SQLite callback path.
+- [Planner](planner-pushdown.md) — exact pushdown policy.
+- [Type mapping](type-mapping.md) — result codecs.

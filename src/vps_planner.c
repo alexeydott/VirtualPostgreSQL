@@ -6,6 +6,11 @@
 #define VPS_PLAN_WIRE_HEADER_BYTES 48U
 #define VPS_PLAN_WIRE_CONSTRAINT_BYTES 16U
 #define VPS_PLAN_WIRE_ORDER_BYTES 4U
+#define VPS_PLAN_MAX_WIRE_BYTES                                           \
+    (VPS_PLAN_WIRE_HEADER_BYTES + VPS_PLAN_MAX_COLUMNS * 2U +            \
+     VPS_PLAN_MAX_CONSTRAINTS * VPS_PLAN_WIRE_CONSTRAINT_BYTES +         \
+     VPS_PLAN_MAX_ORDER_TERMS * VPS_PLAN_WIRE_ORDER_BYTES)
+#define VPS_PLAN_MAX_ACTUAL_ENCODED_BYTES (VPS_PLAN_MAX_WIRE_BYTES * 2U)
 
 static uint64_t vps_plan_min_u64(uint64_t left, uint64_t right)
 {
@@ -283,7 +288,7 @@ VpsPlannerResult vps_plan_encode(const VpsCompiledPlan *plan,
                                  const VpsAllocator *allocator,
                                  VpsBuffer *encoded)
 {
-    unsigned char wire[VPS_PLAN_MAX_ENCODED_BYTES / 2U];
+    unsigned char wire[VPS_PLAN_MAX_WIRE_BYTES];
     size_t wire_size;
     size_t offset;
     size_t index;
@@ -296,8 +301,6 @@ VpsPlannerResult vps_plan_encode(const VpsCompiledPlan *plan,
     wire_size = VPS_PLAN_WIRE_HEADER_BYTES + plan->projection_count * 2U +
                 plan->constraint_count * VPS_PLAN_WIRE_CONSTRAINT_BYTES +
                 plan->order_count * VPS_PLAN_WIRE_ORDER_BYTES;
-    if (wire_size * 2U + 1U > VPS_PLAN_MAX_ENCODED_BYTES)
-        return VPS_PLANNER_LIMIT_EXCEEDED;
     (void)memset(wire, 0, wire_size);
     vps_plan_put_u32(wire, VPS_PLAN_WIRE_MAGIC);
     vps_plan_put_u32(wire + 4U, plan->version);
@@ -352,13 +355,13 @@ VpsPlannerResult vps_plan_decode(const char *encoded,
                                  uint64_t expected_fingerprint,
                                  VpsCompiledPlan *plan)
 {
-    unsigned char wire[VPS_PLAN_MAX_ENCODED_BYTES / 2U];
+    unsigned char wire[VPS_PLAN_MAX_WIRE_BYTES];
     size_t wire_size;
     size_t expected_size;
     size_t offset;
     size_t index;
     if (encoded == NULL || plan == NULL || encoded_length == 0U ||
-        encoded_length >= VPS_PLAN_MAX_ENCODED_BYTES ||
+        encoded_length > VPS_PLAN_MAX_ACTUAL_ENCODED_BYTES ||
         (encoded_length & 1U) != 0U)
         return VPS_PLANNER_INVALID_PLAN;
     wire_size = encoded_length / 2U;

@@ -48,7 +48,49 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_COMPILER": "clang-cl",
-        "VPS_ENABLE_ASAN": "ON"
+        "VPS_ENABLE_ASAN": "ON",
+        "VPS_BUILD_FUZZ": "ON"
+      }
+    },
+    {
+      "name": "clang-cl-x64-ubsan",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/stage15-clang-cl-x64-ubsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "clang-cl",
+        "VPS_ENABLE_UBSAN": "ON",
+        "VPS_BUILD_FUZZ": "ON"
+      }
+    },
+    {
+      "name": "msvc-x86-static-analysis",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/stage15-msvc-x86-static-analysis",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "cl",
+        "VPS_ENABLE_MSVC_ANALYZE": "ON"
+      }
+    },
+    {
+      "name": "msvc-x64-static-analysis",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/stage15-msvc-x64-static-analysis",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "cl",
+        "VPS_ENABLE_MSVC_ANALYZE": "ON"
+      }
+    },
+    {
+      "name": "clang-tidy-x64-static-analysis",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/stage15-clang-tidy-x64-static-analysis",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang-cl",
+        "VPS_ENABLE_CLANG_TIDY": "ON"
       }
     }
   ],
@@ -56,7 +98,11 @@
     { "name": "msvc-x86-debug", "configurePreset": "msvc-x86-debug" },
     { "name": "msvc-x64-release", "configurePreset": "msvc-x64-release" },
     { "name": "clang-cl-x64-debug", "configurePreset": "clang-cl-x64-debug" },
-    { "name": "clang-cl-x64-asan", "configurePreset": "clang-cl-x64-asan" }
+    { "name": "clang-cl-x64-asan", "configurePreset": "clang-cl-x64-asan" },
+    { "name": "clang-cl-x64-ubsan", "configurePreset": "clang-cl-x64-ubsan" },
+    { "name": "msvc-x86-static-analysis", "configurePreset": "msvc-x86-static-analysis" },
+    { "name": "msvc-x64-static-analysis", "configurePreset": "msvc-x64-static-analysis" },
+    { "name": "clang-tidy-x64-static-analysis", "configurePreset": "clang-tidy-x64-static-analysis" }
   ],
   "testPresets": [
     {
@@ -77,6 +123,26 @@
     {
       "name": "clang-cl-x64-asan",
       "configurePreset": "clang-cl-x64-asan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "clang-cl-x64-ubsan",
+      "configurePreset": "clang-cl-x64-ubsan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "msvc-x86-static-analysis",
+      "configurePreset": "msvc-x86-static-analysis",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "msvc-x64-static-analysis",
+      "configurePreset": "msvc-x64-static-analysis",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "clang-tidy-x64-static-analysis",
+      "configurePreset": "clang-tidy-x64-static-analysis",
       "output": { "outputOnFailure": true }
     }
   ]

@@ -385,8 +385,9 @@ static int test_abi_and_lifecycle(void)
     TEST_CHECK(vps_client_connection_close(&connection) == VPS_CLIENT_OK &&
                    backend.connection_destroy_count == 1U,
                "abi_close_repeat");
-    TEST_CHECK(vps_client_cleanup(&client) == VPS_CLIENT_OK &&
-                   vps_client_cleanup(&client) == VPS_CLIENT_OK,
+    TEST_CHECK(vps_client_cleanup(&client) == VPS_CLIENT_OK,
+               "abi_cleanup");
+    TEST_CHECK(vps_client_cleanup(&client) == VPS_CLIENT_OK,
                "abi_cleanup_repeat");
     return 1;
 }
@@ -546,8 +547,9 @@ static int test_statement_rows_and_cancel(void)
                    vps_client_statement_state(statement) ==
                        VPS_CLIENT_STATEMENT_COMPLETE,
                "stmt_fetch_end");
+    TEST_CHECK(vps_client_statement_close(&statement) == VPS_CLIENT_OK,
+               "stmt_close");
     TEST_CHECK(vps_client_statement_close(&statement) == VPS_CLIENT_OK &&
-                   vps_client_statement_close(&statement) == VPS_CLIENT_OK &&
                    backend.statement_destroy_count == 1U &&
                    vps_client_connection_close(&connection) == VPS_CLIENT_OK &&
                    vps_client_cleanup(&client) == VPS_CLIENT_OK,

@@ -1,3 +1,5 @@
+[← Previous: Read-only Virtual Table](read-only-vtable.md) · [Back to README](../README.md) · [Next: Streaming and cancellation →](streaming-cancellation.md)
+
 # Planner and safe pushdown
 
 VirtualPostgreSQL 0.8 adds a bounded planner between SQLite `xBestIndex` and
@@ -56,3 +58,9 @@ fixed fallback. `xBestIndex` never executes remote `EXPLAIN`.
 Planner decisions are observable through structured debug fields containing
 only version, flags, counts, estimated cost/rows and source fingerprint. Raw
 values and connection information are excluded.
+
+## See Also
+
+- [Read-only Virtual Table](read-only-vtable.md) — planner callback integration.
+- [Streaming and cancellation](streaming-cancellation.md) — execution lifecycle.
+- [Query sources](query-sources.md) — wrapper and local materialization.

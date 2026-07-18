@@ -1,4 +1,4 @@
-[← Previous: Query sources](query-sources.md) · [Back to README](../README.md)
+[← Previous: Query sources](query-sources.md) · [Back to README](../README.md) · [Next: Planner →](planner-pushdown.md)
 
 # Read-only Virtual Table path
 
@@ -46,3 +46,9 @@ environment variables.
 Stage 9 extends this contour with explicit host cancellation, checked scan
 limits, late-error and early-close probes, bounded-RSS streaming and eight-way
 cursor concurrency. See [Streaming and cancellation](streaming-cancellation.md).
+
+## See Also
+
+- [Query sources](query-sources.md) — validation and materialization.
+- [Planner](planner-pushdown.md) — xBestIndex contract.
+- [Streaming](streaming-cancellation.md) — cursor states and cancel.

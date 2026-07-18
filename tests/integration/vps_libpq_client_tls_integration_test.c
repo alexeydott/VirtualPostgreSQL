@@ -70,8 +70,7 @@ static const char *vps_tls_test_failure_class(PGconn *connection)
     const char *message = connection == NULL ? NULL : PQerrorMessage(connection);
     if (message == NULL) return "connection";
     if (strstr(message, "channel binding") != NULL) return "channel_binding";
-    if (strstr(message, "certificate") != NULL ||
-        strstr(message, "root certificate") != NULL) return "certificate";
+    if (strstr(message, "certificate") != NULL) return "certificate";
     if (strstr(message, "password authentication failed") != NULL) {
         return "authentication";
     }
@@ -168,6 +167,25 @@ static int vps_tls_test_disable(const VpsTlsTestEnvironment *environment)
     return passed;
 }
 
+static int vps_tls_test_auth_failure(
+    const VpsTlsTestEnvironment *environment)
+{
+    static const char invalid_password[] = "vps-intentionally-invalid-password";
+    VpsTlsTestEnvironment invalid = *environment;
+    PGconn *connection;
+    int passed;
+    invalid.password = invalid_password;
+    connection = vps_tls_test_connect(&invalid, invalid.host, NULL,
+                                      "verify-full", "system", "prefer");
+    passed = connection != NULL && PQstatus(connection) != CONNECTION_OK &&
+             strcmp(vps_tls_test_failure_class(connection),
+                    "authentication") == 0;
+    if (connection != NULL) PQfinish(connection);
+    (void)printf("tls_probe=bad_auth status=%s failure_class=authentication\n",
+                 passed ? "passed" : "failed");
+    return passed;
+}
+
 static int vps_tls_test_channel_binding(
     const VpsTlsTestEnvironment *environment)
 {
@@ -226,8 +244,9 @@ int main(void)
                                             invalid_hostname, hostaddr,
                                             "system");
     passed &= vps_tls_test_channel_binding(&environment);
+    passed &= vps_tls_test_auth_failure(&environment);
     passed &= vps_tls_test_disable(&environment);
-    (void)printf("tls_probe=all status=%s probes=7\n",
+    (void)printf("tls_probe=all status=%s probes=8\n",
                  passed ? "passed" : "failed");
     return passed ? 0 : 1;
 }

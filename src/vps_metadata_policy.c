@@ -182,7 +182,7 @@ VpsMetadataResult vps_relation_policy_build(
     } else if (relation->kind == VPS_RELATION_INHERITANCE_PARENT) {
         candidate.write_policy = VPS_RELATION_WRITE_INHERITANCE_UNSAFE;
     } else if (!relation->writable_candidate) {
-        candidate.write_policy = VPS_RELATION_WRITE_SOURCE_READ_ONLY;
+        /* The initialized source-read-only policy remains in force. */
     } else if (relation->kind == VPS_RELATION_PARTITIONED_TABLE) {
         size_t index;
         candidate.write_policy = VPS_RELATION_WRITE_ALLOWED;

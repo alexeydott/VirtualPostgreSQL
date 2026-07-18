@@ -79,8 +79,8 @@ int main(void)
               VPS_ROW_IDENTITY_MALFORMED);
     vps_buffer_reset(&token);
     CHECK(vps_row_identity_scan_next(&counter, &rowid) == VPS_ROW_IDENTITY_OK &&
-          rowid == 1 &&
-          vps_row_identity_scan_next(&counter, &rowid) == VPS_ROW_IDENTITY_OK &&
+          rowid == 1);
+    CHECK(vps_row_identity_scan_next(&counter, &rowid) == VPS_ROW_IDENTITY_OK &&
           rowid == 2);
     (void)printf("vps_row_identity_test status=passed\n");
     return 0;

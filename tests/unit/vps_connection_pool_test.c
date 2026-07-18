@@ -320,14 +320,14 @@ int main(void)
                                           &waiting[index], 0U, NULL);
             passed &= expect_true(handles[index] != NULL, "fifo_thread");
             if (handles[index] != NULL) {
-                uint32_t spin;
-                for (spin = 0U; spin < 1000U; ++spin) {
+                ULONGLONG deadline = GetTickCount64() + 5000U;
+                do {
                     (void)vps_connection_pool_stats(pool, &stats);
                     if (stats.waiting == index + 1U) {
                         break;
                     }
-                    SwitchToThread();
-                }
+                    Sleep(1U);
+                } while (GetTickCount64() < deadline);
                 passed &= expect_true(stats.waiting == index + 1U,
                                       "fifo_registration");
             }
@@ -374,14 +374,14 @@ int main(void)
         handle = CreateThread(NULL, 0U, waiting_main, &waiting, 0U, NULL);
         passed &= expect_true(handle != NULL, "close_waiter_thread");
         if (handle != NULL) {
-            uint32_t spin;
-            for (spin = 0U; spin < 1000U; ++spin) {
+            ULONGLONG deadline = GetTickCount64() + 5000U;
+            do {
                 (void)vps_connection_pool_stats(pool, &stats);
                 if (stats.waiting == 1U) {
                     break;
                 }
-                SwitchToThread();
-            }
+                Sleep(1U);
+            } while (GetTickCount64() < deadline);
             passed &= expect_true(stats.waiting == 1U,
                                   "close_waiter_registered");
             passed &= expect_true(vps_connection_pool_close(pool) ==

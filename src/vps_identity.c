@@ -254,7 +254,7 @@ static int vps_identity_normalize_path(const char *value,
                                        size_t output_size,
                                        size_t *output_length)
 {
-    size_t segment_offsets[VPS_CREDENTIAL_VALUE_MAX_LENGTH / 2U + 2U];
+    uint16_t segment_offsets[VPS_CREDENTIAL_VALUE_MAX_LENGTH / 2U + 2U];
     unsigned char segment_is_parent[
         VPS_CREDENTIAL_VALUE_MAX_LENGTH / 2U + 2U] = {0};
     size_t segment_count = 0U;
@@ -299,7 +299,8 @@ static int vps_identity_normalize_path(const char *value,
             } else if (!absolute) {
                 if (written != 0U && output[written - 1U] != '/') output[written++] = '/';
                 if (written + 2U >= output_size) return 0;
-                segment_offsets[segment_count++] = written;
+                if (written > UINT16_MAX) return 0;
+                segment_offsets[segment_count++] = (uint16_t)written;
                 segment_is_parent[segment_count - 1U] = 1U;
                 output[written++] = '.';
                 output[written++] = '.';
@@ -309,7 +310,8 @@ static int vps_identity_normalize_path(const char *value,
             if (written != 0U && output[written - 1U] != '/') output[written++] = '/';
             if (written + segment_length >= output_size ||
                 segment_count >= sizeof(segment_offsets) / sizeof(segment_offsets[0])) return 0;
-            segment_offsets[segment_count++] = rollback;
+            if (rollback > UINT16_MAX) return 0;
+            segment_offsets[segment_count++] = (uint16_t)rollback;
             segment_is_parent[segment_count - 1U] = 0U;
             (void)memcpy(output + written, value + input, segment_length);
             written += segment_length;

@@ -34,11 +34,13 @@ int main(void)
               vps_cancel_token_probe(&second) == VPS_INTERRUPT_REQUESTED,
           "requested");
     CHECK(vps_cancel_token_unregister(&first) == VPS_CANCEL_REGISTRY_OK &&
-              vps_cancel_token_unregister(&first) == VPS_CANCEL_REGISTRY_OK &&
               vps_cancel_token_unregister(&second) == VPS_CANCEL_REGISTRY_OK,
+          "unregister");
+    CHECK(vps_cancel_token_unregister(&first) == VPS_CANCEL_REGISTRY_OK,
           "unregister_idempotent");
-    CHECK(vps_cancel_registry_cleanup(&registry) == VPS_CANCEL_REGISTRY_OK &&
-              vps_cancel_registry_cleanup(&registry) == VPS_CANCEL_REGISTRY_OK,
+    CHECK(vps_cancel_registry_cleanup(&registry) == VPS_CANCEL_REGISTRY_OK,
+          "cleanup");
+    CHECK(vps_cancel_registry_cleanup(&registry) == VPS_CANCEL_REGISTRY_OK,
           "cleanup_idempotent");
     (void)fprintf(stdout, "cancel_suite status=passed\n");
     return 0;

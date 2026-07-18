@@ -1,3 +1,5 @@
+[← Previous: Spatial](spatial.md) · [Back to README](../README.md) · [Next: Static analysis →](static-analysis.md)
+
 # Metadata functions, cache, and integrity
 
 VirtualPostgreSQL exposes six `DIRECTONLY` eponymous table-valued functions:
@@ -53,3 +55,9 @@ SQLite `PRAGMA integrity_check` validates shadow row counts, versions, bounds,
 checksum/decode, unique field names, key references, spatial metadata, and the
 schema-row fingerprints without contacting PostgreSQL. A consistency failure
 is reported as integrity text through SQLite's `xIntegrity` contract.
+
+## See Also
+
+- [Table metadata](table-metadata.md) — live catalog snapshot.
+- [Security](security.md) — auth/TLS errors are never masked.
+- [Troubleshooting](troubleshooting.md) — schema drift recovery.

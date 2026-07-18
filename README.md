@@ -1,57 +1,66 @@
 # VirtualPostgreSQL
 
-> Portable C11 SQLite Virtual Table access to PostgreSQL through static,
-> asynchronous libpq.
+> SQLite Virtual Table extension на portable C11 для безопасного доступа к PostgreSQL без внешних client DLL.
 
-VirtualPostgreSQL is a portable C11 SQLite Virtual Table extension for PostgreSQL.
-The project is under staged implementation. The Windows foundation now includes
-the extension ABI, secure connection/session runtime, async client port,
-versioned PostgreSQL metadata, the end-to-end virtual table path,
-conservative predicate/projection/order/limit pushdown, bounded streaming and
-database-scoped cancellation, keyed DML, and coordinated PostgreSQL
-transactions/savepoints.
-
-The normative requirements are maintained outside the tracked release set in
-`VirtualPostgreSQL_Technical_Specification.md`.
+VirtualPostgreSQL отображает PostgreSQL tables/views и проверенные read-only
+`SELECT` как SQLite virtual tables. Windows 1.0 поддерживает async static libpq,
+single-row streaming, conservative pushdown, keyed DML/transactions, PostGIS и
+versioned metadata cache для Win32 и x64.
 
 ## Quick start
 
-Run the current Windows build and test matrix from PowerShell 7:
+Соберите x64 Release и запустите 46 локальных tests:
 
 ```powershell
-pwsh -NoProfile -File scripts/ci/run-stage12.ps1
+pwsh -NoProfile -File scripts/build-stage1.ps1 -Preset msvc-x64-release
 ```
 
-The gate builds and tests MSVC Win32 Debug, MSVC x64 Release, clang-cl x64 Debug
-and clang-cl x64 ASan. Linux and Android are long-term targets whose gates start
-only after all Windows 1.0 stages close.
+Live PostgreSQL параметры передаются только process-local способом. Product
+default остаётся `sslmode=verify-full`; no-SSL разрешён лишь явной policy.
 
-## Verification example
+## Пример
 
-The metadata unit probe emits one architecture-independent vector:
+```sql
+CREATE VIRTUAL TABLE temp.orders USING VirtualPostgreSQL(
+  credential_ref='app/reporting', source=table,
+  schema='reporting', table='orders', mode=ro,
+  key_columns='order_id'
+);
 
-```text
-schema_fingerprint_vector version=1 value=f563dd9d...a3b6821b
+SELECT order_id, created_at
+FROM orders
+WHERE order_id IN (101,102)
+ORDER BY order_id LIMIT 10;
 ```
 
-Live catalog contours receive credentials only through process-local environment
-variables and do not read table rows. Product TLS policy remains
-`sslmode=verify-full`; local no-TLS contours do not change that default.
+Values отправляются typed parameters, identifiers проходят отдельное quoting,
+а PostgreSQL ACL и Row-Level Security продолжают действовать.
 
-## Documentation
+## Возможности Windows 1.0
 
-| Guide | Description |
+- PostgreSQL 15–18; SQLite host 3.44.0+, module v4 и `xIntegrity`.
+- Table/query metadata, exact scalar/bytea/date codecs и stable identity.
+- Predicate/projection/IN/order/limit pushdown с local recheck.
+- Bounded pool, independent cursors, cancellation и unknown-COMMIT safety.
+- Query materialization `memory|temp`, PostGIS WKT/WKB/EWKT/EWKB.
+- Static Win32/x64 runtime: без `libpq.dll`, OpenSSL DLL и zlib DLL.
+
+## Документация
+
+| Раздел | Руководства |
 |---|---|
-| [Connection credentials](docs/connection-credentials.md) | Credential modes, TLS and session baseline |
-| [Client runtime](docs/client-runtime.md) | Async libpq capabilities and diagnostics |
-| [Table metadata](docs/table-metadata.md) | Catalog snapshots, keys and fingerprints |
-| [Metadata functions and cache](docs/metadata-functions-cache.md) | Catalog TVFs, shadow snapshots, drift and integrity |
-| [Query sources](docs/query-sources.md) | Bounded query admission and read-only boundary |
-| [Read-only virtual table](docs/read-only-vtable.md) | SQLite callbacks, codecs, streaming and row identity |
-| [DML and stable identity](docs/dml-identity.md) | Keyed INSERT/UPDATE/DELETE, defaults and optimistic locking |
-| [Transactions and savepoints](docs/transactions-savepoints.md) | Callback mapping, pinned ownership, recovery and ambiguous outcomes |
-| [Planner and pushdown](docs/planner-pushdown.md) | Compiled plans, exactness, projection, ordering and cost |
-| [Streaming and cancellation](docs/streaming-cancellation.md) | Cursor states, limits, cleanup, cancel API and concurrency gates |
+| Начало | [Building](docs/building.md), [Platform support](docs/platform-support.md), [Troubleshooting](docs/troubleshooting.md) |
+| Подключение | [Credentials](docs/connection-credentials.md), [Provider ABI](docs/provider-abi.md), [Security](docs/security.md) |
+| Runtime | [Client](docs/client-runtime.md), [Streaming/cancel](docs/streaming-cancellation.md) |
+| Schema и types | [Table metadata](docs/table-metadata.md), [Type mapping](docs/type-mapping.md), [Metadata/cache](docs/metadata-functions-cache.md) |
+| Query | [Query sources](docs/query-sources.md), [Read-only VTable](docs/read-only-vtable.md), [Planner](docs/planner-pushdown.md) |
+| Запись | [DML/identity](docs/dml-identity.md), [Transactions](docs/transactions-savepoints.md) |
+| Spatial | [PostGIS](docs/spatial.md) |
+| Quality/release | [Static analysis](docs/static-analysis.md), [Sanitizers](docs/sanitizers.md), [Release notes](docs/release-notes-1.0.0.md), [Acceptance](docs/windows-1.0-acceptance.md), [Examples](examples/README.md) |
+
+Linux и Android — долгосрочные post-Windows contours. Stock Android SQLite
+обычно не разрешает loadable extensions; будущий Android host должен
+поддерживать dynamic load либо static entry-point registration.
 
 ## License
 

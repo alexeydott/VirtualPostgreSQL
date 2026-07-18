@@ -133,6 +133,14 @@ static void vps_erase_bytes(char *value)
     }
 }
 
+static void vps_erase_buffer(void *value, size_t length)
+{
+    volatile unsigned char *bytes = (volatile unsigned char *)value;
+    size_t index;
+    if (value == NULL) return;
+    for (index = 0U; index < length; ++index) bytes[index] = 0U;
+}
+
 static void vps_release_options(PQconninfoOption *options)
 {
     PQconninfoOption *option;
@@ -173,7 +181,7 @@ VpsConnectionStringResult vps_libpq_client_conninfo_parse(
     (void)memcpy(copy, conninfo, conninfo_length);
     copy[conninfo_length] = '\0';
     parsed = PQconninfoParse(copy, &error);
-    (void)memset(copy, 0, conninfo_length + 1U);
+    vps_erase_buffer(copy, conninfo_length + 1U);
     free(copy);
     if (parsed == NULL) {
         if (error != NULL) {
@@ -187,7 +195,6 @@ VpsConnectionStringResult vps_libpq_client_conninfo_parse(
     config.header.api_version = VPS_API_VERSION;
     for (option = parsed; option->keyword != NULL; ++option) {
         const VpsConninfoKeyword *keyword;
-        const char **member;
         if (option->val == NULL) {
             continue;
         }
@@ -200,8 +207,8 @@ VpsConnectionStringResult vps_libpq_client_conninfo_parse(
             vps_release_options(parsed);
             return VPS_CONNECTION_STRING_CONNINFO_REJECTED;
         }
-        member = (const char **)((unsigned char *)&config + keyword->offset);
-        *member = option->val;
+        (void)memcpy((unsigned char *)&config + keyword->offset,
+                     &option->val, sizeof(option->val));
         config.header.present_fields |= keyword->field;
     }
     result = consumer(consumer_context, &config);

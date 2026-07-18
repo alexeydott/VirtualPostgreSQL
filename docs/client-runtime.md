@@ -1,4 +1,4 @@
-[← Previous: Connection credentials](connection-credentials.md) · [Back to README](../README.md) · [Next: Table metadata →](table-metadata.md)
+[← Previous: Security](security.md) · [Back to README](../README.md) · [Next: Table metadata →](table-metadata.md)
 
 # Client runtime capabilities
 

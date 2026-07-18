@@ -598,8 +598,10 @@ static VpsQueryCacheStatus vps_table_build_snapshot(void *context,
                                                     VpsEmbeddedSqlite *snapshot)
 {
     VpsTable *table = (VpsTable *)context;
-    VpsEmbeddedValueKind kinds[VPS_PLAN_MAX_COLUMNS];
-    VpsEmbeddedIndexDefinition indexes[VPS_QUERY_INDEX_MAX_COUNT];
+    VpsEmbeddedValueKind *kinds = NULL;
+    VpsEmbeddedIndexDefinition *indexes = NULL;
+    size_t kinds_bytes = sizeof(*kinds) * VPS_PLAN_MAX_COLUMNS;
+    size_t indexes_bytes = sizeof(*indexes) * VPS_QUERY_INDEX_MAX_COUNT;
     VpsEmbeddedSchema schema;
     VpsConnectionLease lease;
     VpsClientConnection *connection = NULL;
@@ -608,13 +610,26 @@ static VpsQueryCacheStatus vps_table_build_snapshot(void *context,
     VpsCursorLimits limits;
     VpsCursorBudget budget;
     VpsError error;
+    VpsDecodedValue *decoded = NULL;
+    VpsEmbeddedValue *values = NULL;
+    size_t decoded_bytes = sizeof(*decoded) * VPS_PLAN_MAX_COLUMNS;
+    size_t values_bytes = sizeof(*values) * VPS_PLAN_MAX_COLUMNS;
     VpsClientStatus client_status = VPS_CLIENT_BACKEND_ERROR;
     VpsQueryCacheStatus result = VPS_QUERY_CACHE_BUILD_FAILED;
     int error_initialized = 0;
     int complete = 0;
     size_t index;
     (void)memset(&lease, 0, sizeof(lease));
-    (void)memset(indexes, 0, sizeof(indexes));
+    if (vps_memory_allocate(&table->allocator, kinds_bytes,
+                            (void **)&kinds) != VPS_MEMORY_OK ||
+        vps_memory_allocate(&table->allocator, indexes_bytes,
+                            (void **)&indexes) != VPS_MEMORY_OK) {
+        vps_memory_release(&table->allocator, (void **)&indexes,
+                           indexes_bytes);
+        vps_memory_release(&table->allocator, (void **)&kinds, kinds_bytes);
+        return VPS_QUERY_CACHE_BUILD_FAILED;
+    }
+    (void)memset(indexes, 0, indexes_bytes);
     vps_cursor_limits_default(&limits);
     if (vps_cursor_budget_init(&budget, &limits, UINT64_C(1), &table->logger) !=
         VPS_CURSOR_LIMIT_OK)
@@ -637,8 +652,22 @@ static VpsQueryCacheStatus vps_table_build_snapshot(void *context,
     schema.index_count = table->query_indexes.index_count;
     schema.source_fingerprint = table->source_fingerprint;
     schema.layout_fingerprint = table->source_fingerprint;
-    if (vps_embedded_sqlite_create_schema(snapshot, &schema) !=
-        VPS_EMBEDDED_SQLITE_OK) return VPS_QUERY_CACHE_BUILD_FAILED;
+    client_status = vps_embedded_sqlite_create_schema(snapshot, &schema) ==
+                            VPS_EMBEDDED_SQLITE_OK
+                        ? VPS_CLIENT_OK
+                        : VPS_CLIENT_BACKEND_ERROR;
+    vps_memory_release(&table->allocator, (void **)&indexes, indexes_bytes);
+    vps_memory_release(&table->allocator, (void **)&kinds, kinds_bytes);
+    if (client_status != VPS_CLIENT_OK) return VPS_QUERY_CACHE_BUILD_FAILED;
+    if (vps_memory_allocate(&table->allocator, decoded_bytes,
+                            (void **)&decoded) != VPS_MEMORY_OK ||
+        vps_memory_allocate(&table->allocator, values_bytes,
+                            (void **)&values) != VPS_MEMORY_OK) {
+        vps_memory_release(&table->allocator, (void **)&values, values_bytes);
+        vps_memory_release(&table->allocator, (void **)&decoded,
+                           decoded_bytes);
+        return VPS_QUERY_CACHE_BUILD_FAILED;
+    }
     if (vps_error_init(&error, &table->allocator) == VPS_MEMORY_OK)
         error_initialized = 1;
     if (!error_initialized ||
@@ -664,13 +693,11 @@ static VpsQueryCacheStatus vps_table_build_snapshot(void *context,
         client_status = vps_drive_statement(statement, NULL, &error);
     while (client_status == VPS_CLIENT_OK) {
         const VpsClientRowView *row = NULL;
-        VpsDecodedValue decoded[VPS_PLAN_MAX_COLUMNS];
-        VpsEmbeddedValue values[VPS_PLAN_MAX_COLUMNS];
         uint64_t row_bytes = 0U;
         uint64_t largest_column = 0U;
         size_t column;
-        (void)memset(decoded, 0, sizeof(decoded));
-        (void)memset(values, 0, sizeof(values));
+        (void)memset(decoded, 0, decoded_bytes);
+        (void)memset(values, 0, values_bytes);
         client_status = vps_client_statement_start(
             statement, VPS_CLIENT_OPERATION_FETCH, &error);
         if (client_status == VPS_CLIENT_OK)
@@ -736,6 +763,8 @@ cleanup:
                         ? VPS_CONNECTION_LEASE_CLEAN
                         : VPS_CONNECTION_LEASE_DIRTY);
     if (error_initialized) vps_error_reset(&error);
+    vps_memory_release(&table->allocator, (void **)&values, values_bytes);
+    vps_memory_release(&table->allocator, (void **)&decoded, decoded_bytes);
     return result;
 }
 #endif
@@ -1151,7 +1180,6 @@ static int vps_table_integrate_spatial(VpsTable *table)
     uint32_t override_srid = 0U;
     size_t index;
     int has_spatial = 0;
-    int projected_initialized = 0;
     if (table == NULL || !table->initialized_spatial ||
         table->described.field_count > VPS_PLAN_MAX_COLUMNS)
         return 0;
@@ -1193,7 +1221,6 @@ static int vps_table_integrate_spatial(VpsTable *table)
     if (vps_buffer_init(&projected, &table->allocator,
                         VPS_VTAB_QUERY_LIMIT) != VPS_MEMORY_OK)
         return 0;
-    projected_initialized = 1;
     if (!vps_append_bytes(&projected, "SELECT ", 7U)) goto fail;
     for (index = 0U; index < table->described.field_count; ++index) {
         VpsQueryDescribeField *field = &table->described.fields[index];
@@ -1231,7 +1258,7 @@ static int vps_table_integrate_spatial(VpsTable *table)
     table->scan_query = projected;
     return 1;
 fail:
-    if (projected_initialized) vps_buffer_reset(&projected);
+    vps_buffer_reset(&projected);
     return 0;
 }
 
@@ -1265,7 +1292,7 @@ static int vps_resolve_row_identity(VpsTable *table)
                     attribute_number)
                     break;
             }
-            if (field == table->described.field_count || field > UINT16_MAX)
+            if (field == table->described.field_count)
                 return 0;
             table->key_columns[table->key_column_count++] = (uint16_t)field;
         }
@@ -1276,8 +1303,7 @@ static int vps_resolve_row_identity(VpsTable *table)
                 table->described.fields[table->key_columns[0]].type_oid) ==
                 VPS_CODEC_INTEGER) {
             table->identity_mode = VPS_ROW_IDENTITY_STABLE_INTEGER;
-            table->has_hidden_identity =
-                table->optimistic_mode != VPS_DML_OPTIMISTIC_OFF;
+            table->has_hidden_identity = 0;
         } else {
             table->identity_mode = VPS_ROW_IDENTITY_HIDDEN_TOKEN;
             table->has_hidden_identity = 1;
@@ -1840,7 +1866,7 @@ static int vps_module_connect_common(sqlite3 *database,
     VpsError error;
     int error_initialized = 0;
     int result;
-    const char *failure = "runtime initialization";
+    const char *failure;
     if (database == NULL || table_out == NULL) return SQLITE_MISUSE;
     *table_out = NULL;
     table = (VpsTable *)sqlite3_malloc64(sizeof(*table));
@@ -1870,6 +1896,7 @@ static int vps_module_connect_common(sqlite3 *database,
                                           &error);
     if (vps_error_init(&error, &table->allocator) == VPS_MEMORY_OK)
         error_initialized = 1;
+    failure = "runtime initialization";
     if (result == SQLITE_OK) {
         failure = "source describe";
         result = vps_table_describe(table, &error);
@@ -1893,8 +1920,10 @@ static int vps_module_connect_common(sqlite3 *database,
         }
         if (result == SQLITE_OK)
             result = vps_table_snapshot_hydrate(table, &stored_snapshot);
-        if (result == SQLITE_OK) table->cache_fallback = 1;
-        failure = "cached metadata declaration";
+        if (result == SQLITE_OK) {
+            table->cache_fallback = 1;
+            failure = "cached metadata declaration";
+        }
     }
     if (result == SQLITE_OK) {
         table->visible_field_count = table->described.field_count;
@@ -1909,9 +1938,10 @@ static int vps_module_connect_common(sqlite3 *database,
         failure = "spatial integration";
         if (!vps_table_integrate_spatial(table)) result = SQLITE_ERROR;
     }
-    failure = "DML policy";
-    if (result == SQLITE_OK && !vps_table_build_dml_policy(table))
-        result = SQLITE_ERROR;
+    if (result == SQLITE_OK) {
+        failure = "DML policy";
+        if (!vps_table_build_dml_policy(table)) result = SQLITE_ERROR;
+    }
     if (result == SQLITE_OK) {
         failure = "expected fields";
         if (!vps_build_expected_fields(table)) result = SQLITE_NOMEM;
@@ -3751,13 +3781,18 @@ static int vps_module_update(sqlite3_vtab *base,
 {
     VpsTable *table = (VpsTable *)base;
     VpsDmlOperation operation;
-    VpsDmlPlan plan;
+    VpsDmlPlan *plan = NULL;
     VpsRowIdentityView identity;
-    VpsClientParameterView parameters[VPS_DML_MAX_PARAMETERS];
-    VpsClientResultFieldExpectation fields[
-        VPS_METADATA_MAX_KEY_COLUMNS + 1U];
-    size_t offsets[VPS_DML_MAX_PARAMETERS];
-    unsigned char included[VPS_DML_MAX_COLUMNS];
+    VpsClientParameterView *parameters = NULL;
+    VpsClientResultFieldExpectation *fields = NULL;
+    size_t *offsets = NULL;
+    unsigned char *included = NULL;
+    size_t plan_bytes = sizeof(*plan);
+    size_t parameter_array_bytes = sizeof(*parameters) * VPS_DML_MAX_PARAMETERS;
+    size_t field_array_bytes =
+        sizeof(*fields) * (VPS_METADATA_MAX_KEY_COLUMNS + 1U);
+    size_t offset_array_bytes = sizeof(*offsets) * VPS_DML_MAX_PARAMETERS;
+    size_t included_bytes = sizeof(*included) * VPS_DML_MAX_COLUMNS;
     VpsBuffer parameter_bytes;
     VpsConnectionLease lease;
     VpsClientConnection *connection = NULL;
@@ -3791,11 +3826,32 @@ static int vps_module_update(sqlite3_vtab *base,
                         ? VPS_DML_INSERT : VPS_DML_UPDATE;
     else
         return SQLITE_MISUSE;
-    (void)memset(&plan, 0, sizeof(plan));
+    if (vps_memory_allocate(&table->allocator, plan_bytes,
+                            (void **)&plan) != VPS_MEMORY_OK ||
+        vps_memory_allocate(&table->allocator, parameter_array_bytes,
+                            (void **)&parameters) != VPS_MEMORY_OK ||
+        vps_memory_allocate(&table->allocator, field_array_bytes,
+                            (void **)&fields) != VPS_MEMORY_OK ||
+        vps_memory_allocate(&table->allocator, offset_array_bytes,
+                            (void **)&offsets) != VPS_MEMORY_OK ||
+        vps_memory_allocate(&table->allocator, included_bytes,
+                            (void **)&included) != VPS_MEMORY_OK) {
+        vps_memory_release(&table->allocator, (void **)&included,
+                           included_bytes);
+        vps_memory_release(&table->allocator, (void **)&offsets,
+                           offset_array_bytes);
+        vps_memory_release(&table->allocator, (void **)&fields,
+                           field_array_bytes);
+        vps_memory_release(&table->allocator, (void **)&parameters,
+                           parameter_array_bytes);
+        vps_memory_release(&table->allocator, (void **)&plan, plan_bytes);
+        return SQLITE_NOMEM;
+    }
+    (void)memset(plan, 0, plan_bytes);
     (void)memset(&identity, 0, sizeof(identity));
-    (void)memset(parameters, 0, sizeof(parameters));
-    (void)memset(fields, 0, sizeof(fields));
-    (void)memset(included, 0, sizeof(included));
+    (void)memset(parameters, 0, parameter_array_bytes);
+    (void)memset(fields, 0, field_array_bytes);
+    (void)memset(included, 0, included_bytes);
     (void)memset(&lease, 0, sizeof(lease));
     (void)memset(&spec, 0, sizeof(spec));
     (void)memset(&metadata, 0, sizeof(metadata));
@@ -3843,7 +3899,7 @@ static int vps_module_update(sqlite3_vtab *base,
         &table->allocator, &table->dml_policy, operation,
         operation == VPS_DML_DELETE ? NULL : included,
         operation == VPS_DML_DELETE ? 0U : table->visible_field_count,
-        operation == VPS_DML_INSERT ? NULL : &identity, &plan);
+        operation == VPS_DML_INSERT ? NULL : &identity, plan);
     if (dml_result != VPS_DML_OK) {
         failure = vps_dml_result_name(dml_result);
         result = dml_result == VPS_DML_GENERATED_COLUMN ||
@@ -3860,8 +3916,8 @@ static int vps_module_update(sqlite3_vtab *base,
         goto cleanup;
     }
     bytes_initialized = 1;
-    for (index = 0U; index < plan.parameter_count; ++index) {
-        const VpsDmlParameterSlot *slot = &plan.parameters[index];
+    for (index = 0U; index < plan->parameter_count; ++index) {
+        const VpsDmlParameterSlot *slot = &plan->parameters[index];
         int appended;
         if (slot->source == VPS_DML_PARAMETER_NEW_VALUE)
             appended = vps_dml_append_parameter(
@@ -3884,15 +3940,15 @@ static int vps_module_update(sqlite3_vtab *base,
             goto cleanup;
         }
     }
-    for (index = 0U; index < plan.parameter_count; ++index)
+    for (index = 0U; index < plan->parameter_count; ++index)
         if (!parameters[index].is_null)
             parameters[index].value = parameter_bytes.data + offsets[index];
-    for (index = 0U; index < plan.returning_count; ++index) {
-        if (plan.returning_visible[index] == UINT16_MAX)
+    for (index = 0U; index < plan->returning_count; ++index) {
+        if (plan->returning_visible[index] == UINT16_MAX)
             fields[index].type_oid = UINT32_C(25);
         else
             fields[index].type_oid = table->dml_policy.selections[
-                plan.returning_visible[index]].declared_type_oid;
+                plan->returning_visible[index]].declared_type_oid;
         fields[index].format = VPS_CLIENT_VALUE_TEXT;
     }
     {
@@ -3921,12 +3977,12 @@ static int vps_module_update(sqlite3_vtab *base,
     failure = "statement execution";
     if (!in_transaction)
         connection = (VpsClientConnection *)lease.connection;
-    spec.query = (const char *)plan.query.data;
-    spec.query_length = plan.query.size;
+    spec.query = (const char *)plan->query.data;
+    spec.query_length = plan->query.size;
     spec.parameters = parameters;
-    spec.parameter_count = plan.parameter_count;
+    spec.parameter_count = plan->parameter_count;
     spec.result_fields = fields;
-    spec.result_field_count = plan.returning_count;
+    spec.result_field_count = plan->returning_count;
     spec.timeout_ms = 60000U;
     spec.single_row = 1;
     spec.error_operation = VPS_ERROR_OPERATION_DML;
@@ -3968,7 +4024,7 @@ static int vps_module_update(sqlite3_vtab *base,
         vps_client_statement_current_row(statement, &row,
                                          error_initialized ? &error : NULL) !=
             VPS_CLIENT_OK ||
-        vps_client_row_column_count(row) != plan.returning_count)
+        vps_client_row_column_count(row) != plan->returning_count)
         goto cleanup;
     failure = "RETURNING row";
     if (operation == VPS_DML_INSERT && rowid_out != NULL &&
@@ -4030,7 +4086,7 @@ cleanup:
             &lease, clean ? VPS_CONNECTION_LEASE_CLEAN
                           : VPS_CONNECTION_LEASE_DIRTY);
     if (bytes_initialized) vps_buffer_reset(&parameter_bytes);
-    if (plan_initialized) vps_dml_plan_reset(&plan);
+    if (plan_initialized) vps_dml_plan_reset(plan);
     if (result != SQLITE_OK)
     {
         char fallback[128];
@@ -4044,6 +4100,14 @@ cleanup:
             fallback);
     }
     if (error_initialized) vps_error_reset(&error);
+    vps_memory_release(&table->allocator, (void **)&included, included_bytes);
+    vps_memory_release(&table->allocator, (void **)&offsets,
+                       offset_array_bytes);
+    vps_memory_release(&table->allocator, (void **)&fields,
+                       field_array_bytes);
+    vps_memory_release(&table->allocator, (void **)&parameters,
+                       parameter_array_bytes);
+    vps_memory_release(&table->allocator, (void **)&plan, plan_bytes);
     return result;
 }
 
@@ -4547,7 +4611,7 @@ static int vps_metadata_filter(sqlite3_vtab_cursor *cursor,
     int result = SQLITE_OK;
     size_t parameter;
     (void)index_string;
-    if (metadata == NULL || metadata->table == NULL ||
+    if (metadata == NULL || metadata->table == NULL || arguments == NULL ||
         index_number != (int)((1U << metadata->table->hidden_count) - 1U) ||
         argument_count != (int)metadata->table->hidden_count)
         return SQLITE_CONSTRAINT;
@@ -4568,6 +4632,10 @@ static int vps_metadata_filter(sqlite3_vtab_cursor *cursor,
         metadata, sqlite3_value_text(arguments[0]),
         (size_t)sqlite3_value_bytes(arguments[0]));
     if (result != SQLITE_OK) goto fail;
+    if (metadata->runtime == NULL) {
+        result = SQLITE_INTERNAL;
+        goto fail;
+    }
     if (vps_connection_pool_acquire(
             metadata->runtime->pool, &metadata->runtime->pool_key, 10000U,
             NULL, NULL, &metadata->lease) != VPS_CONNECTION_POOL_OK) {
@@ -4775,7 +4843,7 @@ static int vps_metadata_rowid(sqlite3_vtab_cursor *cursor,
 {
     VpsMetadataCursor *metadata = (VpsMetadataCursor *)cursor;
     if (rowid == NULL) return SQLITE_MISUSE;
-    *rowid = (sqlite3_int64)(metadata->row + 1U);
+    *rowid = (sqlite3_int64)metadata->row + 1;
     return SQLITE_OK;
 }
 

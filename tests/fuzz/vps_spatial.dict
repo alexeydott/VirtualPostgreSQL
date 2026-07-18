@@ -1,0 +1,4 @@
+point="POINT(0 0)"
+srid="SRID=4326;"
+polygon="POLYGON((0 0,1 0,1 1,0 0))"
+little_endian="\x01"

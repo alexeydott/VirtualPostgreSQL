@@ -1,4 +1,4 @@
-[← Previous: Client runtime](client-runtime.md) · [Back to README](../README.md)
+[← Previous: Client runtime](client-runtime.md) · [Back to README](../README.md) · [Next: Type mapping →](type-mapping.md)
 
 # PostgreSQL table metadata
 

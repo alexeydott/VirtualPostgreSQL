@@ -41,9 +41,9 @@ static int add_column(VpsColumnSet *set, size_t index, const char *name,
 int main(void)
 {
     VpsAllocator allocator;
-    VpsTableMetadata metadata;
-    VpsDmlPolicy policy;
-    VpsDmlPlan plan;
+    VpsTableMetadata *metadata = NULL;
+    VpsDmlPolicy *policy = NULL;
+    VpsDmlPlan *plan = NULL;
     VpsSpatialCapabilities spatial;
     VpsRowIdentityField keys[1];
     VpsRowIdentityField version;
@@ -56,77 +56,84 @@ int main(void)
     int token_initialized = 0;
     int spatial_initialized = 0;
     int passed = 0;
-    (void)memset(&metadata, 0, sizeof(metadata));
-    (void)memset(&plan, 0, sizeof(plan));
     (void)memset(&identity, 0, sizeof(identity));
     CHECK(vps_allocator_system(&allocator) == VPS_MEMORY_OK);
-    CHECK(vps_relation_metadata_init(&metadata.relation, &allocator, NULL) ==
+    CHECK(vps_memory_allocate(&allocator, sizeof(*policy),
+                              (void **)&policy) == VPS_MEMORY_OK);
+    CHECK(vps_memory_allocate(&allocator, sizeof(*plan),
+                              (void **)&plan) == VPS_MEMORY_OK);
+    (void)memset(policy, 0, sizeof(*policy));
+    (void)memset(plan, 0, sizeof(*plan));
+    CHECK(vps_memory_allocate(&allocator, sizeof(*metadata),
+                              (void **)&metadata) == VPS_MEMORY_OK);
+    (void)memset(metadata, 0, sizeof(*metadata));
+    CHECK(vps_relation_metadata_init(&metadata->relation, &allocator, NULL) ==
           VPS_METADATA_OK);
     relation_initialized = 1;
-    metadata.relation.relation_oid = 4242U;
-    metadata.relation.kind = VPS_RELATION_TABLE;
-    metadata.relation.readable = 1;
-    metadata.relation.writable_candidate = 1;
-    CHECK(vps_buffer_append(&metadata.relation.schema_name, "odd\"schema", 10U)
+    metadata->relation.relation_oid = 4242U;
+    metadata->relation.kind = VPS_RELATION_TABLE;
+    metadata->relation.readable = 1;
+    metadata->relation.writable_candidate = 1;
+    CHECK(vps_buffer_append(&metadata->relation.schema_name, "odd\"schema", 10U)
           == VPS_MEMORY_OK);
-    CHECK(vps_buffer_append(&metadata.relation.relation_name, "dml_fixture", 11U)
+    CHECK(vps_buffer_append(&metadata->relation.relation_name, "dml_fixture", 11U)
           == VPS_MEMORY_OK);
-    CHECK(vps_column_set_init(&metadata.columns, &allocator, NULL) ==
+    CHECK(vps_column_set_init(&metadata->columns, &allocator, NULL) ==
           VPS_METADATA_OK);
     columns_initialized = 1;
     CHECK(vps_memory_allocate(&allocator,
-                              4U * sizeof(*metadata.columns.columns),
-                              (void **)&metadata.columns.columns) ==
+                              4U * sizeof(*metadata->columns.columns),
+                              (void **)&metadata->columns.columns) ==
           VPS_MEMORY_OK);
-    metadata.columns.columns_bytes = 4U * sizeof(*metadata.columns.columns);
-    metadata.columns.column_count = 4U;
-    metadata.columns.visible_count = 4U;
-    CHECK(add_column(&metadata.columns, 0U, "id", 23U, "int4", 'N', 1));
-    CHECK(add_column(&metadata.columns, 1U, "payload", 25U, "text", 'S', 0));
-    CHECK(add_column(&metadata.columns, 2U, "bytes", 17U, "bytea", 'U', 0));
-    CHECK(add_column(&metadata.columns, 3U, "version", 20U, "int8", 'N', 1));
-    metadata.key.source = VPS_KEY_PRIMARY;
-    metadata.key.column_count = 1U;
-    metadata.key.attribute_numbers[0] = 1;
-    metadata.policy.write_policy = VPS_RELATION_WRITE_ALLOWED;
-    CHECK(vps_type_registry_init(&metadata.type_registry, NULL) ==
+    metadata->columns.columns_bytes = 4U * sizeof(*metadata->columns.columns);
+    metadata->columns.column_count = 4U;
+    metadata->columns.visible_count = 4U;
+    CHECK(add_column(&metadata->columns, 0U, "id", 23U, "int4", 'N', 1));
+    CHECK(add_column(&metadata->columns, 1U, "payload", 25U, "text", 'S', 0));
+    CHECK(add_column(&metadata->columns, 2U, "bytes", 17U, "bytea", 'U', 0));
+    CHECK(add_column(&metadata->columns, 3U, "version", 20U, "int8", 'N', 1));
+    metadata->key.source = VPS_KEY_PRIMARY;
+    metadata->key.column_count = 1U;
+    metadata->key.attribute_numbers[0] = 1;
+    metadata->policy.write_policy = VPS_RELATION_WRITE_ALLOWED;
+    CHECK(vps_type_registry_init(&metadata->type_registry, NULL) ==
           VPS_METADATA_OK);
-    metadata.loaded = 1;
+    metadata->loaded = 1;
 
-    CHECK(vps_dml_policy_build(&metadata, 1, VPS_DML_OPTIMISTIC_COLUMN,
-                               "version", 7U, &policy) == VPS_DML_OK);
+    CHECK(vps_dml_policy_build(metadata, 1, VPS_DML_OPTIMISTIC_COLUMN,
+                               "version", 7U, policy) == VPS_DML_OK);
     included[0] = 0U;
     included[3] = 0U;
-    CHECK(vps_dml_plan_build(&allocator, &policy, VPS_DML_INSERT, included,
-                             4U, NULL, &plan) == VPS_DML_OK);
-    CHECK(strstr((const char *)plan.query.data,
+    CHECK(vps_dml_plan_build(&allocator, policy, VPS_DML_INSERT, included,
+                             4U, NULL, plan) == VPS_DML_OK);
+    CHECK(strstr((const char *)plan->query.data,
                  "INSERT INTO \"odd\"\"schema\".\"dml_fixture\"") != NULL);
-    CHECK(strstr((const char *)plan.query.data, "\"payload\",\"bytes\"") != NULL);
-    CHECK(plan.parameter_count == 2U && plan.returning_count == 2U);
-    vps_dml_plan_reset(&plan);
+    CHECK(strstr((const char *)plan->query.data, "\"payload\",\"bytes\"") != NULL);
+    CHECK(plan->parameter_count == 2U && plan->returning_count == 2U);
+    vps_dml_plan_reset(plan);
     CHECK(vps_spatial_capabilities_init(&spatial, &allocator, NULL) ==
           VPS_SPATIAL_OK);
     spatial_initialized = 1;
     CHECK(vps_buffer_append(&spatial.schema, "geo", 3U) == VPS_MEMORY_OK);
     spatial.present = 1;
     spatial.flags = UINT32_MAX;
-    policy.spatial = &spatial;
-    policy.spatial_format = VPS_SPATIAL_FORMAT_WKT;
-    policy.spatial_kind[1] = 1U;
-    policy.spatial_srid[1] = 4326U;
+    policy->spatial = &spatial;
+    policy->spatial_format = VPS_SPATIAL_FORMAT_WKT;
+    policy->spatial_kind[1] = 1U;
+    policy->spatial_srid[1] = 4326U;
     included[1] = 1U;
     included[2] = 0U;
-    CHECK(vps_dml_plan_build(&allocator, &policy, VPS_DML_INSERT, included,
-                             4U, NULL, &plan) == VPS_DML_OK);
-    CHECK(strstr((const char *)plan.query.data,
+    CHECK(vps_dml_plan_build(&allocator, policy, VPS_DML_INSERT, included,
+                             4U, NULL, plan) == VPS_DML_OK);
+    CHECK(strstr((const char *)plan->query.data,
                  "\"geo\".ST_GeomFromText($1::pg_catalog.text,"
                  "$2::pg_catalog.int4)") != NULL &&
-          plan.parameter_count == 2U &&
-          plan.parameters[0].source == VPS_DML_PARAMETER_NEW_VALUE &&
-          plan.parameters[0].type_oid == 25U &&
-          plan.parameters[1].source == VPS_DML_PARAMETER_SPATIAL_SRID);
-    vps_dml_plan_reset(&plan);
-    policy.spatial_kind[1] = 0U;
+          plan->parameter_count == 2U &&
+          plan->parameters[0].source == VPS_DML_PARAMETER_NEW_VALUE &&
+          plan->parameters[0].type_oid == 25U &&
+          plan->parameters[1].source == VPS_DML_PARAMETER_SPATIAL_SRID);
+    vps_dml_plan_reset(plan);
+    policy->spatial_kind[1] = 0U;
 
     (void)memset(keys, 0, sizeof(keys));
     (void)memset(&version, 0, sizeof(version));
@@ -151,20 +158,20 @@ int main(void)
     (void)memset(included, 0, sizeof(included));
     included[0] = 1U;
     included[1] = 1U;
-    CHECK(vps_dml_plan_build(&allocator, &policy, VPS_DML_UPDATE, included,
-                             4U, &identity, &plan) == VPS_DML_OK);
-    CHECK(strstr((const char *)plan.query.data,
+    CHECK(vps_dml_plan_build(&allocator, policy, VPS_DML_UPDATE, included,
+                             4U, &identity, plan) == VPS_DML_OK);
+    CHECK(strstr((const char *)plan->query.data,
                  "WHERE \"id\" IS NOT DISTINCT FROM $3") != NULL);
-    CHECK(strstr((const char *)plan.query.data,
+    CHECK(strstr((const char *)plan->query.data,
                  "\"version\" IS NOT DISTINCT FROM $4") != NULL);
-    CHECK(plan.parameter_count == 4U && plan.returns_optimistic);
-    vps_dml_plan_reset(&plan);
+    CHECK(plan->parameter_count == 4U && plan->returns_optimistic);
+    vps_dml_plan_reset(plan);
 
-    CHECK(vps_dml_plan_build(&allocator, &policy, VPS_DML_DELETE, NULL, 0U,
-                             &identity, &plan) == VPS_DML_OK);
-    CHECK(strstr((const char *)plan.query.data, "DELETE FROM") != NULL);
-    CHECK(plan.parameter_count == 2U);
-    vps_dml_plan_reset(&plan);
+    CHECK(vps_dml_plan_build(&allocator, policy, VPS_DML_DELETE, NULL, 0U,
+                             &identity, plan) == VPS_DML_OK);
+    CHECK(strstr((const char *)plan->query.data, "DELETE FROM") != NULL);
+    CHECK(plan->parameter_count == 2U);
+    vps_dml_plan_reset(plan);
     CHECK(vps_dml_classify_count(VPS_DML_UPDATE,
                                  VPS_DML_OPTIMISTIC_COLUMN, 0U) ==
           VPS_DML_CONFLICT);
@@ -175,16 +182,19 @@ int main(void)
                                  VPS_DML_OPTIMISTIC_OFF, 2U) ==
           VPS_DML_INVARIANT);
     identity.relation_oid += 1U;
-    CHECK(vps_dml_plan_build(&allocator, &policy, VPS_DML_DELETE, NULL, 0U,
-                             &identity, &plan) ==
+    CHECK(vps_dml_plan_build(&allocator, policy, VPS_DML_DELETE, NULL, 0U,
+                             &identity, plan) ==
           VPS_DML_MALFORMED_IDENTITY);
     passed = 1;
 cleanup:
-    vps_dml_plan_reset(&plan);
+    if (plan != NULL) vps_dml_plan_reset(plan);
     if (token_initialized) vps_buffer_reset(&token);
     if (spatial_initialized) vps_spatial_capabilities_reset(&spatial);
-    if (columns_initialized) vps_column_set_reset(&metadata.columns);
-    if (relation_initialized) vps_relation_metadata_reset(&metadata.relation);
+    if (columns_initialized) vps_column_set_reset(&metadata->columns);
+    if (relation_initialized) vps_relation_metadata_reset(&metadata->relation);
+    vps_memory_release(&allocator, (void **)&metadata, sizeof(*metadata));
+    vps_memory_release(&allocator, (void **)&plan, sizeof(*plan));
+    vps_memory_release(&allocator, (void **)&policy, sizeof(*policy));
     if (passed) (void)printf("vps_dml_test: passed\n");
     return passed ? 0 : 1;
 }

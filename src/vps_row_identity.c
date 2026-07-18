@@ -208,8 +208,7 @@ static VpsRowIdentityResult vps_identity_decode_field(
     field->type_oid = vps_identity_read_u32(token + *offset + 1U);
     length = vps_identity_read_u32(token + *offset + 5U);
     *offset += VPS_IDENTITY_FIELD_HEADER_BYTES;
-    if (field->kind < VPS_ROW_IDENTITY_FIELD_NULL ||
-        field->kind > VPS_ROW_IDENTITY_FIELD_BLOB ||
+    if (field->kind > VPS_ROW_IDENTITY_FIELD_BLOB ||
         (field->kind == VPS_ROW_IDENTITY_FIELD_NULL && length != 0U) ||
         (field->kind == VPS_ROW_IDENTITY_FIELD_INTEGER && length != 8U) ||
         length > token_length - *offset)

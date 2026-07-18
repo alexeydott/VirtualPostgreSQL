@@ -1,6 +1,7 @@
 #include "vps_spatial.h"
 
 #include <ctype.h>
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -475,7 +476,8 @@ static int vps_wkt_number(VpsWktParser *parser)
                  parser->token_length);
     number[parser->token_length] = '\0';
     parsed = strtod(number, &end);
-    if (end == NULL || *end != '\0' || !isfinite(parsed)) return 0;
+    if (end == NULL || *end != '\0' || !(parsed >= -DBL_MAX) ||
+        !(parsed <= DBL_MAX)) return 0;
     vps_wkt_next(parser);
     return 1;
 }
@@ -785,7 +787,7 @@ static int vps_wkb_geometry(VpsWkbParser *parser, uint32_t depth,
     has_srid = (raw_type & UINT32_C(0x20000000)) != 0U;
     if ((raw_type & UINT32_C(0xe0000000)) == 0U && type_number >= 1000U) {
         uint32_t family = type_number / 1000U;
-        if (family < 1U || family > 3U) return 0;
+        if (family > 3U) return 0;
         dimensions = family == 3U ? 4U : 3U;
         type_number %= 1000U;
     }

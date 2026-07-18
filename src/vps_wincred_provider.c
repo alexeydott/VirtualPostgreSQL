@@ -433,7 +433,7 @@ static int32_t VPS_CALL vps_wincred_resolve(void *provider_context,
     VpsWinCredLeaseOwner *owner = NULL;
     VpsCredentialFields fields = 0U;
     int32_t result = VPS_CREDENTIAL_PROVIDER_ERROR;
-    const char *status = "error";
+    const char *status;
     int record_acquired = 0;
     VpsWinCredTargetResult target_result;
 

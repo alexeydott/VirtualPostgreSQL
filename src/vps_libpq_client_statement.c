@@ -531,8 +531,8 @@ VpsClientStatus vps_libpq_statement_start(
             return VPS_CLIENT_INVALID_STATE;
         }
     } else if (operation == VPS_CLIENT_OPERATION_FETCH) {
-        if ((!statement->spec.single_row &&
-             statement->phase == VPS_LIBPQ_STATEMENT_COMPLETE)) {
+        if (!statement->spec.single_row &&
+            statement->phase == VPS_LIBPQ_STATEMENT_COMPLETE) {
             return VPS_CLIENT_OK;
         }
         if (!statement->spec.single_row ||
@@ -590,9 +590,6 @@ VpsClientStatus vps_libpq_statement_start(
     statement->deadline_started = 1;
     statement->poll_count = 0U;
     statement->wait_count = 0U;
-    if (operation == VPS_CLIENT_OPERATION_FETCH) {
-        return VPS_CLIENT_OK;
-    }
     if (operation == VPS_CLIENT_OPERATION_PREPARE) {
         send_result = client->api.send_prepare(
             client->api.context, statement->connection->postgresql_connection,

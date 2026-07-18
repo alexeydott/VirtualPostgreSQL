@@ -369,7 +369,9 @@ static int vps_session_observed_timeout(const char *value,
     if (index < length) {
         const char *unit = value + index;
         size_t unit_length = length - index;
-        if (unit_length == 2U && memcmp(unit, "ms", 2U) == 0) multiplier = 1U;
+        if (unit_length == 2U && memcmp(unit, "ms", 2U) == 0) {
+            /* Milliseconds are the base unit. */
+        }
         else if (unit_length == 1U && unit[0] == 's') multiplier = 1000U;
         else if (unit_length == 3U && memcmp(unit, "min", 3U) == 0) multiplier = 60000U;
         else if (unit_length == 1U && unit[0] == 'h') multiplier = 3600000U;

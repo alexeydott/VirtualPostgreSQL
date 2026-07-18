@@ -22,7 +22,7 @@ static const char vps_columns_sql[] =
     "a.attidentity::pg_catalog.text,a.attcollation::pg_catalog.text,"
     "co.collname::pg_catalog.text,co.collprovider::pg_catalog.text,"
     "co.collisdeterministic::pg_catalog.text,a.attstorage::pg_catalog.text,"
-    "a.attcompression::pg_catalog.text,a.attstattarget::pg_catalog.text,"
+    "a.attcompression::pg_catalog.text,COALESCE(a.attstattarget,-1)::pg_catalog.text,"
     "(des.description IS NOT NULL)::pg_catalog.text,a.attrelid::pg_catalog.text,"
     "a.attnum::pg_catalog.text,t.typnotnull::pg_catalog.text,"
     "bt.typnamespace::pg_catalog.text,btn.nspname::pg_catalog.text,"
@@ -361,16 +361,37 @@ VpsMetadataResult vps_metadata_rowset_copy(VpsMetadataRowSet *rowset,
         vps_memory_release(&rowset->allocator, (void **)&cells, cell_bytes);
         return VPS_METADATA_OUT_OF_MEMORY;
     }
+    if ((cell_count != 0U && cells == NULL) ||
+        (total_bytes != 0U && bytes == NULL)) {
+        vps_memory_release(&rowset->allocator, (void **)&bytes, total_bytes);
+        vps_memory_release(&rowset->allocator, (void **)&cells, cell_bytes);
+        return VPS_METADATA_OUT_OF_MEMORY;
+    }
     if (cell_bytes != 0U) (void)memset(cells, 0, cell_bytes);
     for (row = 0U; row < input->row_count; ++row) {
         for (field = 0U; field < input->field_count; ++field) {
             size_t index = row * input->field_count + field;
+            if (index >= cell_count) {
+                vps_memory_release(&rowset->allocator, (void **)&bytes,
+                                   total_bytes);
+                vps_memory_release(&rowset->allocator, (void **)&cells,
+                                   cell_bytes);
+                return VPS_METADATA_INVALID_RESULT;
+            }
             cells[index].is_null = input->is_null(input->context, row, field);
             cells[index].offset = byte_offset;
             if (!cells[index].is_null) {
                 const void *value = input->value(input->context, row, field);
                 cells[index].length = input->length(input->context, row, field);
                 if (cells[index].length != 0U) {
+                    if (value == NULL || byte_offset > total_bytes ||
+                        cells[index].length > total_bytes - byte_offset) {
+                        vps_memory_release(&rowset->allocator, (void **)&bytes,
+                                           total_bytes);
+                        vps_memory_release(&rowset->allocator, (void **)&cells,
+                                           cell_bytes);
+                        return VPS_METADATA_INVALID_RESULT;
+                    }
                     (void)memcpy(bytes + byte_offset, value,
                                  cells[index].length);
                     byte_offset += cells[index].length;
@@ -441,6 +462,10 @@ VpsMetadataResult vps_metadata_rowset_append(VpsMetadataRowSet *rowset,
         vps_size_multiply(cell_count, sizeof(*cells), &cell_bytes) !=
             VPS_MEMORY_OK)
         return VPS_METADATA_LIMIT_EXCEEDED;
+    if ((rowset->cell_bytes != 0U && rowset->cells == NULL) ||
+        (rowset->bytes_size != 0U && rowset->bytes == NULL) ||
+        rowset->cell_bytes > cell_bytes || rowset->bytes_size > total_bytes)
+        return VPS_METADATA_INVALID_RESULT;
     if (cell_bytes != 0U &&
         vps_memory_allocate(&rowset->allocator, cell_bytes,
                             (void **)&cells) != VPS_MEMORY_OK)
@@ -448,6 +473,12 @@ VpsMetadataResult vps_metadata_rowset_append(VpsMetadataRowSet *rowset,
     if (total_bytes != 0U &&
         vps_memory_allocate(&rowset->allocator, total_bytes,
                             (void **)&bytes) != VPS_MEMORY_OK) {
+        vps_memory_release(&rowset->allocator, (void **)&cells, cell_bytes);
+        return VPS_METADATA_OUT_OF_MEMORY;
+    }
+    if ((cell_count != 0U && cells == NULL) ||
+        (total_bytes != 0U && bytes == NULL)) {
+        vps_memory_release(&rowset->allocator, (void **)&bytes, total_bytes);
         vps_memory_release(&rowset->allocator, (void **)&cells, cell_bytes);
         return VPS_METADATA_OUT_OF_MEMORY;
     }
@@ -460,12 +491,27 @@ VpsMetadataResult vps_metadata_rowset_append(VpsMetadataRowSet *rowset,
     for (row = 0U; row < input->row_count; ++row) {
         for (field = 0U; field < input->field_count; ++field) {
             size_t index = (rowset->row_count + row) * input->field_count + field;
+            if (index >= cell_count) {
+                vps_memory_release(&rowset->allocator, (void **)&bytes,
+                                   total_bytes);
+                vps_memory_release(&rowset->allocator, (void **)&cells,
+                                   cell_bytes);
+                return VPS_METADATA_INVALID_RESULT;
+            }
             cells[index].is_null = input->is_null(input->context, row, field);
             cells[index].offset = offset;
             if (!cells[index].is_null) {
                 const void *value = input->value(input->context, row, field);
                 cells[index].length = input->length(input->context, row, field);
                 if (cells[index].length != 0U) {
+                    if (value == NULL || offset > total_bytes ||
+                        cells[index].length > total_bytes - offset) {
+                        vps_memory_release(&rowset->allocator, (void **)&bytes,
+                                           total_bytes);
+                        vps_memory_release(&rowset->allocator, (void **)&cells,
+                                           cell_bytes);
+                        return VPS_METADATA_INVALID_RESULT;
+                    }
                     (void)memcpy(bytes + offset, value, cells[index].length);
                     offset += cells[index].length;
                 }

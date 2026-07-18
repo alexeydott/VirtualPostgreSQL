@@ -1,4 +1,4 @@
-[Back to README](../README.md) · [Next: Client runtime →](client-runtime.md)
+[← Previous: Building](building.md) · [Back to README](../README.md) · [Next: Provider ABI →](provider-abi.md)
 
 # Connection credential modes
 

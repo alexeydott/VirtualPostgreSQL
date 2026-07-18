@@ -154,4 +154,4 @@ try {
     }
 }
 
-Write-Output '[tls-stand] status=passed probes=7 data_queries=0'
+Write-Output '[tls-stand] status=passed probes=8 data_queries=0'

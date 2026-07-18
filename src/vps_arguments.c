@@ -459,6 +459,17 @@ static VpsArgumentsResult vps_arguments_parse_one(
                                      parsed->presence);
         return VPS_ARGUMENTS_UNKNOWN_ARGUMENT;
     }
+    if ((unsigned int)argument_id >= 64U) {
+        vps_arguments_set_diagnostic(diagnostic, VPS_ARGUMENTS_MALFORMED,
+                                     argument_id, parsed->presence);
+        return VPS_ARGUMENTS_MALFORMED;
+    }
+    if ((size_t)argument_id >=
+        sizeof(parsed->values) / sizeof(parsed->values[0])) {
+        vps_arguments_set_diagnostic(diagnostic, VPS_ARGUMENTS_MALFORMED,
+                                     argument_id, parsed->presence);
+        return VPS_ARGUMENTS_MALFORMED;
+    }
     if ((parsed->presence & (UINT64_C(1) << argument_id)) != 0U) {
         vps_arguments_set_diagnostic(diagnostic,
                                      VPS_ARGUMENTS_DUPLICATE_ARGUMENT,

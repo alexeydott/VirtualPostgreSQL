@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
   VirtualPostgreSQL
-  VERSION 0.1.0
+  VERSION 1.0.0
   DESCRIPTION "Portable SQLite Virtual Table extension for PostgreSQL"
   LANGUAGES C
 )
@@ -21,9 +21,30 @@ function(vps_apply_strict_warnings target_name)
   if(MSVC)
     target_compile_options(${target_name} PRIVATE
       /W4 /WX /permissive- /utf-8 /sdl)
+    if(VPS_REPRODUCIBLE_BUILD)
+      target_compile_options(${target_name} PRIVATE
+        /Brepro /experimental:deterministic
+        "/pathmap:${CMAKE_SOURCE_DIR}=.")
+      get_target_property(vps_repro_target_type ${target_name} TYPE)
+      if(vps_repro_target_type STREQUAL "EXECUTABLE" OR
+         vps_repro_target_type STREQUAL "SHARED_LIBRARY" OR
+         vps_repro_target_type STREQUAL "MODULE_LIBRARY")
+        target_link_options(${target_name} PRIVATE /Brepro)
+      endif()
+    endif()
+    if(VPS_ENABLE_MSVC_ANALYZE AND NOT target_name MATCHES "_test$")
+      target_compile_options(${target_name} PRIVATE /analyze /analyze:external-)
+    endif()
   elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${target_name} PRIVATE
       -Wall -Wextra -Wpedantic -Werror -fvisibility=hidden)
+  endif()
+  # Unit-test CHECK macros deliberately accumulate failures instead of
+  # returning, which defeats path-sensitive null analysis. Analyze production
+  # targets here; PVS-Studio still scans the complete solution, including tests.
+  if(VPS_ENABLE_CLANG_TIDY AND NOT target_name MATCHES "_test$")
+    set_property(TARGET ${target_name} PROPERTY
+      C_CLANG_TIDY "${VPS_CLANG_TIDY_COMMAND}")
   endif()
 endfunction()
 
@@ -32,10 +53,37 @@ set(VPS_SQLITE_AMALGAMATION_DIR
   CACHE PATH "Directory containing pinned sqlite3.c/sqlite3.h/sqlite3ext.h")
 option(VPS_BUILD_EXTENSION "Build the loadable extension and SQLite host tests" ON)
 option(VPS_ENABLE_ASAN "Enable AddressSanitizer for supported Windows targets" OFF)
+option(VPS_ENABLE_UBSAN "Enable supported clang-cl UndefinedBehaviorSanitizer checks" OFF)
+option(VPS_ENABLE_MSVC_ANALYZE "Enable MSVC native static analysis" OFF)
+option(VPS_ENABLE_CLANG_TIDY "Enable the selected clang-tidy gate" OFF)
 option(VPS_ENABLE_WINCRED "Build the Windows Credential Manager adapter" ON)
 option(VPS_ENABLE_QUERY_MATERIALIZATION
   "Build the symbol-isolated private SQLite query snapshot adapter" ON)
 option(VPS_BUILD_FUZZ "Build clang libFuzzer targets" OFF)
+option(VPS_REPRODUCIBLE_BUILD
+  "Enable deterministic MSVC compile/link flags for release artifacts" OFF)
+
+if(VPS_REPRODUCIBLE_BUILD AND (NOT MSVC OR NOT CMAKE_BUILD_TYPE STREQUAL "Release"))
+  message(FATAL_ERROR
+    "[reproducibility] VPS_REPRODUCIBLE_BUILD requires MSVC Release")
+endif()
+
+if(VPS_ENABLE_MSVC_ANALYZE AND NOT MSVC)
+  message(FATAL_ERROR
+    "[analysis] VPS_ENABLE_MSVC_ANALYZE requires an MSVC-compatible compiler")
+endif()
+
+if(VPS_ENABLE_CLANG_TIDY)
+  find_program(VPS_CLANG_TIDY_EXECUTABLE NAMES clang-tidy REQUIRED)
+  set(VPS_CLANG_TIDY_COMMAND
+    "${VPS_CLANG_TIDY_EXECUTABLE}"
+    "--checks=-*,clang-analyzer-core.*,clang-analyzer-deadcode.DeadStores,bugprone-sizeof-expression,bugprone-suspicious-memory-comparison,bugprone-suspicious-semicolon,bugprone-undefined-memory-manipulation,cert-str34-c"
+    "--warnings-as-errors=*"
+    "--header-filter=.*[\\\\/]src[\\\\/].*"
+  )
+  message(STATUS
+    "[analysis] clang-tidy enabled: ${VPS_CLANG_TIDY_EXECUTABLE}")
+endif()
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
   set(VPS_DEPENDENCY_ARCH "x64")
@@ -55,14 +103,14 @@ set(VPS_LIBPQ_LIBRARY_DIR "${VPS_PINNED_DEPENDENCY_ROOT}/libpq/lib")
 set(VPS_OPENSSL_LIBRARY_DIR "${VPS_PINNED_DEPENDENCY_ROOT}/openssl/lib")
 set(VPS_ZLIB_LIBRARY_DIR "${VPS_PINNED_DEPENDENCY_ROOT}/zlib/lib")
 
-if(VPS_ENABLE_ASAN)
+if(VPS_ENABLE_ASAN OR VPS_ENABLE_UBSAN)
   if(NOT (MSVC AND CMAKE_C_COMPILER_ID MATCHES "Clang"))
     message(FATAL_ERROR
-      "[sanitizer] VPS_ENABLE_ASAN requires clang-cl on Windows")
+      "[sanitizer] Windows sanitizer contours require clang-cl")
   endif()
   if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR
-      "[sanitizer] the current AddressSanitizer contour supports x64 only")
+      "[sanitizer] the current Windows sanitizer contours support x64 only")
   endif()
 
   execute_process(
@@ -76,11 +124,14 @@ if(VPS_ENABLE_ASAN)
       "[sanitizer] unable to discover the clang resource directory")
   endif()
 
-  set(VPS_CLANG_ASAN_DIR "${VPS_CLANG_RESOURCE_DIR}/lib/windows")
+  set(VPS_CLANG_SANITIZER_DIR "${VPS_CLANG_RESOURCE_DIR}/lib/windows")
+endif()
+
+if(VPS_ENABLE_ASAN)
   set(VPS_CLANG_ASAN_RUNTIME
-    "${VPS_CLANG_ASAN_DIR}/clang_rt.asan-x86_64.lib")
+    "${VPS_CLANG_SANITIZER_DIR}/clang_rt.asan-x86_64.lib")
   set(VPS_CLANG_ASAN_CXX_RUNTIME
-    "${VPS_CLANG_ASAN_DIR}/clang_rt.asan_cxx-x86_64.lib")
+    "${VPS_CLANG_SANITIZER_DIR}/clang_rt.asan_cxx-x86_64.lib")
   foreach(vps_asan_file IN ITEMS
       "${VPS_CLANG_ASAN_RUNTIME}"
       "${VPS_CLANG_ASAN_CXX_RUNTIME}")
@@ -92,22 +143,28 @@ if(VPS_ENABLE_ASAN)
 endif()
 
 function(vps_apply_asan target_name)
-  if(NOT VPS_ENABLE_ASAN)
+  if(NOT VPS_ENABLE_ASAN AND NOT VPS_ENABLE_UBSAN)
     return()
   endif()
-  target_compile_options(${target_name} PRIVATE /fsanitize=address)
-
   get_target_property(vps_target_type ${target_name} TYPE)
-  if(NOT vps_target_type STREQUAL "STATIC_LIBRARY")
-    target_link_libraries(${target_name} PRIVATE
-      "${VPS_CLANG_ASAN_RUNTIME}"
-      "${VPS_CLANG_ASAN_CXX_RUNTIME}"
-    )
-    target_link_options(${target_name} PRIVATE
-      "/wholearchive:${VPS_CLANG_ASAN_RUNTIME}"
-      "/wholearchive:${VPS_CLANG_ASAN_CXX_RUNTIME}"
-      /INFERASANLIBS:NO
-    )
+  if(VPS_ENABLE_ASAN)
+    target_compile_options(${target_name} PRIVATE /fsanitize=address)
+    if(NOT vps_target_type STREQUAL "STATIC_LIBRARY")
+      target_link_libraries(${target_name} PRIVATE
+        "${VPS_CLANG_ASAN_RUNTIME}" "${VPS_CLANG_ASAN_CXX_RUNTIME}")
+      target_link_options(${target_name} PRIVATE
+        "/wholearchive:${VPS_CLANG_ASAN_RUNTIME}"
+        "/wholearchive:${VPS_CLANG_ASAN_CXX_RUNTIME}" /INFERASANLIBS:NO)
+    endif()
+  endif()
+  if(VPS_ENABLE_UBSAN)
+    target_compile_options(${target_name} PRIVATE
+      /clang:-fsanitize=undefined /clang:-fno-sanitize-recover=undefined)
+    if(NOT vps_target_type STREQUAL "STATIC_LIBRARY")
+      target_link_libraries(${target_name} PRIVATE "${VPS_CLANG_UBSAN_RUNTIME}")
+      target_link_options(${target_name} PRIVATE
+        "/wholearchive:${VPS_CLANG_UBSAN_RUNTIME}")
+    endif()
   endif()
 endfunction()
 
@@ -538,6 +595,20 @@ target_include_directories(vps_metadata PUBLIC
 )
 target_link_libraries(vps_metadata PUBLIC vps_logging vps_memory)
 vps_apply_strict_warnings(vps_metadata)
+if(VPS_ENABLE_MSVC_ANALYZE)
+  # C6385 cannot model the checked vps_memory_allocate byte-size contract in
+  # vps_metadata_rowset_copy; explicit index/byte guards remain in the code.
+  target_compile_options(vps_metadata PRIVATE /wd6385 /wd6387)
+endif()
+
+if(VPS_ENABLE_UBSAN)
+  set(VPS_CLANG_UBSAN_RUNTIME
+    "${VPS_CLANG_SANITIZER_DIR}/clang_rt.ubsan_standalone-x86_64.lib")
+  if(NOT EXISTS "${VPS_CLANG_UBSAN_RUNTIME}")
+    message(FATAL_ERROR
+      "[sanitizer] required clang UBSan runtime is missing: ${VPS_CLANG_UBSAN_RUNTIME}")
+  endif()
+endif()
 vps_apply_asan(vps_metadata)
 
 add_library(vps_metadata_cache STATIC
@@ -642,6 +713,23 @@ if(VPS_BUILD_FUZZ)
     target_link_options(vps_query_source_fuzz PRIVATE -fsanitize=fuzzer)
   endif()
   vps_apply_strict_warnings(vps_query_source_fuzz)
+  vps_apply_asan(vps_query_source_fuzz)
+
+  function(vps_add_fuzz_target target_name source_name)
+    add_executable(${target_name} ${source_name})
+    target_compile_features(${target_name} PRIVATE c_std_11)
+    set_target_properties(${target_name} PROPERTIES C_EXTENSIONS OFF)
+    target_link_libraries(${target_name} PRIVATE ${ARGN})
+    if(CMAKE_C_SIMULATE_ID STREQUAL "MSVC")
+      target_compile_options(${target_name} PRIVATE -fsanitize=fuzzer-no-link)
+      target_link_libraries(${target_name} PRIVATE "${VPS_LIBFUZZER_RUNTIME}")
+    else()
+      target_compile_options(${target_name} PRIVATE -fsanitize=fuzzer)
+      target_link_options(${target_name} PRIVATE -fsanitize=fuzzer)
+    endif()
+    vps_apply_strict_warnings(${target_name})
+    vps_apply_asan(${target_name})
+  endfunction()
 endif()
 
 add_library(vps_query_profile STATIC
@@ -760,6 +848,7 @@ if(VPS_BUILD_FUZZ)
     target_link_options(vps_planner_fuzz PRIVATE -fsanitize=fuzzer)
   endif()
   vps_apply_strict_warnings(vps_planner_fuzz)
+  vps_apply_asan(vps_planner_fuzz)
 endif()
 
 add_library(vps_type_codec STATIC
@@ -974,6 +1063,25 @@ if(EXISTS "${VPS_LIBPQ_INCLUDE_DIR}/libpq-fe.h" AND
 else()
   message(FATAL_ERROR
     "[libpq] pinned static dependency contour is incomplete: ${VPS_PINNED_DEPENDENCY_ROOT}")
+endif()
+
+if(VPS_BUILD_FUZZ)
+  vps_add_fuzz_target(vps_arguments_fuzz
+    tests/fuzz/vps_arguments_fuzz.c vps_arguments vps_platform)
+  vps_add_fuzz_target(vps_conninfo_fuzz
+    tests/fuzz/vps_conninfo_fuzz.c vps_libpq_client_conninfo)
+  vps_add_fuzz_target(vps_query_indexes_fuzz
+    tests/fuzz/vps_query_indexes_fuzz.c vps_query_metadata)
+  vps_add_fuzz_target(vps_query_metadata_fuzz
+    tests/fuzz/vps_query_metadata_fuzz.c vps_query_metadata)
+  vps_add_fuzz_target(vps_row_identity_fuzz
+    tests/fuzz/vps_row_identity_fuzz.c vps_row_identity)
+  vps_add_fuzz_target(vps_type_codec_fuzz
+    tests/fuzz/vps_type_codec_fuzz.c vps_type_codec)
+  vps_add_fuzz_target(vps_spatial_fuzz
+    tests/fuzz/vps_spatial_fuzz.c vps_spatial)
+  vps_add_fuzz_target(vps_redaction_fuzz
+    tests/fuzz/vps_redaction_fuzz.c vps_logging)
 endif()
 
 if(WIN32 AND VPS_ENABLE_WINCRED)
@@ -1482,6 +1590,9 @@ if(BUILD_TESTING)
   target_compile_features(vps_client_stream_performance_test PRIVATE c_std_11)
   set_target_properties(vps_client_stream_performance_test PROPERTIES C_EXTENSIONS OFF)
   target_link_libraries(vps_client_stream_performance_test PRIVATE vps_client)
+  if(WIN32)
+    target_link_libraries(vps_client_stream_performance_test PRIVATE psapi)
+  endif()
   vps_apply_strict_warnings(vps_client_stream_performance_test)
   vps_apply_asan(vps_client_stream_performance_test)
   add_test(NAME vps_client_stream_performance COMMAND vps_client_stream_performance_test)

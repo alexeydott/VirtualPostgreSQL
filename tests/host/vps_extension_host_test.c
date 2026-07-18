@@ -180,6 +180,9 @@ static size_t vps_peak_working_set(void)
 static int vps_runtime_bulk_contour(sqlite3 *database, const char *connstr)
 {
     enum { VPS_BULK_CURSOR_COUNT = 8, VPS_BULK_CYCLES = 1000 };
+    const size_t stream_rows =
+        vps_environment_enabled("VPS_VTAB_TEST_PERFORMANCE")
+            ? 1000000U : 10000U;
     sqlite3_stmt *statements[VPS_BULK_CURSOR_COUNT];
     sqlite3_stmt *stream = NULL;
     char *sql;
@@ -200,8 +203,9 @@ static int vps_runtime_bulk_contour(sqlite3 *database, const char *connstr)
         "CREATE VIRTUAL TABLE temp.vps_stream USING VirtualPostgreSQL("
         "connstr=%Q,source=query,query=%Q,mode=ro,key_columns=id)",
         connstr,
-        "SELECT g::pg_catalog.int8 AS id "
-        "FROM pg_catalog.generate_series(1,10000) AS g");
+        vps_environment_enabled("VPS_VTAB_TEST_PERFORMANCE")
+            ? "SELECT g::pg_catalog.int8 AS id FROM pg_catalog.generate_series(1,1000000) AS g"
+            : "SELECT g::pg_catalog.int8 AS id FROM pg_catalog.generate_series(1,10000) AS g");
     if (sql == NULL) return 0;
     passed &= vps_exec_expect(database, sql);
     sqlite3_free(sql);
@@ -217,7 +221,7 @@ static int vps_runtime_bulk_contour(sqlite3 *database, const char *connstr)
     }
     passed &= vps_expect(stream != NULL && step_result == SQLITE_DONE,
                          "real-stream-terminal", database);
-    passed &= vps_expect(row_count == 10000U, "real-stream-row-count", database);
+    passed &= vps_expect(row_count == stream_rows, "real-stream-row-count", database);
     (void)sqlite3_finalize(stream);
 #if defined(_WIN32)
     rss_after = vps_peak_working_set();
@@ -412,6 +416,9 @@ static int vps_runtime_contour(sqlite3 *database,
     passed &= vps_query_contains(
         database, "EXPLAIN QUERY PLAN SELECT id FROM vps_planner WHERE id=2",
         "VIRTUAL TABLE INDEX 2:");
+    (void)printf(
+        "[host] level=info operation=pushdown-equivalence cases=9 unique_plan=1 local_recheck=1 status=%s\n",
+        passed ? "passed" : "failed");
     sql = sqlite3_mprintf(
         "CREATE VIRTUAL TABLE temp.vps_materialized_memory USING "
         "VirtualPostgreSQL(connstr=%Q,source=query,query=%Q,mode=ro,"
