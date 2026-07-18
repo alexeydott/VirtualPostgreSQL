@@ -59,15 +59,25 @@ typedef struct VpsLibpqStatement {
     uint64_t query_hash;
     uint64_t published_row_count;
     uint64_t published_byte_count;
+    uint64_t affected_count;
     size_t current_row_bytes;
     char query_fingerprint[VPS_ERROR_FINGERPRINT_BUFFER_SIZE];
     char prepared_name[VPS_LIBPQ_STATEMENT_NAME_SIZE];
     int native_parameter_count;
     int described;
+    int affected_count_valid;
     int deadline_started;
     int cancel_sqlstate_seen;
     int cancel_terminal_seen;
 } VpsLibpqStatement;
+
+static VpsErrorOperation vps_libpq_statement_error_operation(
+    const VpsLibpqStatement *statement)
+{
+    return statement->spec.error_operation == VPS_ERROR_OPERATION_NONE
+               ? VPS_ERROR_OPERATION_QUERY
+               : statement->spec.error_operation;
+}
 
 static void vps_libpq_statement_log(const VpsLibpqStatement *statement,
                                     VpsLogLevel level,
@@ -137,11 +147,13 @@ static VpsClientStatus vps_libpq_statement_error(
     if (error != NULL && error->initialized) {
         if (sqlstate != NULL) {
             error_result = vps_error_set_sqlstate(
-                error, VPS_ERROR_OPERATION_QUERY, sqlstate, 0, 0,
+                error, vps_libpq_statement_error_operation(statement),
+                sqlstate, 0, 0,
                 statement->query_fingerprint);
         } else {
             error_result = vps_error_set_local(
-                error, VPS_ERROR_OPERATION_QUERY, error_class,
+                error, vps_libpq_statement_error_operation(statement),
+                error_class,
                 statement->query_fingerprint);
         }
     }
@@ -166,7 +178,9 @@ static VpsClientStatus vps_libpq_statement_control_signal(
                             "libpq_statement", "control",
                             vps_error_class_name(error_class), NULL);
     if (error != NULL && error->initialized &&
-        vps_error_set_local(error, VPS_ERROR_OPERATION_QUERY, error_class,
+        vps_error_set_local(error,
+                            vps_libpq_statement_error_operation(statement),
+                            error_class,
                             statement->query_fingerprint) != VPS_MEMORY_OK)
         return VPS_CLIENT_OUT_OF_MEMORY;
     return VPS_CLIENT_CONTROL_SIGNAL;
@@ -877,14 +891,40 @@ static VpsClientStatus vps_libpq_statement_fetch_result(
         return VPS_CLIENT_OK;
     }
     if (status == VPS_LIBPQ_RESULT_TUPLES_OK) {
+        const char *command_tuples;
+        uint64_t affected = 0U;
+        int affected_valid = 0;
         check_result = vps_libpq_statement_check_metadata(
             statement, statement->current_result, 0, error);
         row_count = client->api.result_row_count(
             client->api.context, statement->current_result);
+        command_tuples = client->api.result_command_tuples(
+            client->api.context, statement->current_result);
+        if (command_tuples != NULL && command_tuples[0] != '\0') {
+            const unsigned char *digit =
+                (const unsigned char *)command_tuples;
+            affected_valid = 1;
+            while (*digit != '\0') {
+                if (*digit < '0' || *digit > '9' ||
+                    affected > (UINT64_MAX - (uint64_t)(*digit - '0')) / 10U) {
+                    affected_valid = -1;
+                    break;
+                }
+                affected = affected * 10U + (uint64_t)(*digit - '0');
+                ++digit;
+            }
+        }
         client->api.clear_result(client->api.context,
                                  statement->current_result);
         statement->current_result = NULL;
         if (check_result != VPS_CLIENT_OK) return check_result;
+        if (affected_valid < 0)
+            return vps_libpq_statement_error(
+                statement, error, VPS_ERROR_CLASS_INVARIANT, NULL);
+        if (affected_valid > 0) {
+            statement->affected_count = affected;
+            statement->affected_count_valid = 1;
+        }
         if (row_count != 0) {
             return vps_libpq_statement_error(
                 statement, error, VPS_ERROR_CLASS_INVARIANT, NULL);
@@ -1227,7 +1267,8 @@ VpsClientStatus vps_libpq_statement_metadata(
         (const VpsLibpqStatement *)statement_value;
     (void)error;
     if (client == NULL || statement == NULL || metadata == NULL ||
-        statement->connection->client != client || !statement->described) {
+        statement->connection->client != client ||
+        (statement->spec.discover_result_fields && !statement->described)) {
         return VPS_CLIENT_INVALID_STATE;
     }
     (void)memset(metadata, 0, sizeof(*metadata));
@@ -1237,7 +1278,11 @@ VpsClientStatus vps_libpq_statement_metadata(
         metadata->result_field_count = statement->described_field_count;
     }
     metadata->query_fingerprint = statement->query_hash;
-    metadata->described = 1;
+    metadata->published_row_count = statement->published_row_count;
+    metadata->affected_count = statement->affected_count;
+    metadata->affected_count_valid = statement->affected_count_valid;
+    metadata->described = statement->described ||
+                          !statement->spec.discover_result_fields;
     return VPS_CLIENT_OK;
 }
 

@@ -416,6 +416,13 @@ static int vps_libpq_default_result_row_count(void *context,
     return PQntuples((const PGresult *)result);
 }
 
+static const char *vps_libpq_default_result_command_tuples(
+    void *context, const void *result)
+{
+    (void)context;
+    return PQcmdTuples((PGresult *)result);
+}
+
 static int vps_libpq_default_result_value_is_null(
     void *context, const void *result, int row, int column)
 {
@@ -514,7 +521,8 @@ const VpsLibpqClientApi *vps_libpq_client_default_api(void)
         vps_libpq_default_result_sqlstate,
         vps_libpq_default_clear_result,
         vps_libpq_default_finish,
-        vps_libpq_default_result_primary_message};
+        vps_libpq_default_result_primary_message,
+        vps_libpq_default_result_command_tuples};
     return &api;
 }
 
@@ -553,6 +561,7 @@ static int vps_libpq_api_valid(const VpsLibpqClientApi *api)
            api->result_field_attribute != NULL &&
            api->result_field_format != NULL &&
            api->result_row_count != NULL &&
+           api->result_command_tuples != NULL &&
            api->result_value_is_null != NULL &&
            api->result_value != NULL &&
            api->result_value_length != NULL &&

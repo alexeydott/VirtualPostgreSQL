@@ -79,6 +79,7 @@ typedef struct FakeApi {
     int32_t described_field_attributes[8];
     const char *result_sqlstate;
     const char *result_primary_message;
+    const char *command_tuples;
     VpsLibpqResultStatus stream_statuses[8];
     size_t stream_length;
     size_t stream_index;
@@ -490,6 +491,10 @@ static int fake_result_row_count(void *context, const void *result)
   return fake_result_status(context, result) == VPS_LIBPQ_RESULT_SINGLE_TUPLE ||
                  fake->current_command == 4 || fake->current_command == 5
              ? 1 : 0; }
+static const char *fake_result_command_tuples(void *context,
+                                               const void *result)
+{ FakeApi *fake = (FakeApi *)context; (void)result;
+  return fake->command_tuples != NULL ? fake->command_tuples : ""; }
 static int fake_result_is_null(void *context, const void *result,
                                int row, int column)
 { (void)context; (void)result; (void)row; (void)column; return 0; }
@@ -612,6 +617,7 @@ static VpsLibpqClientApi fake_api(FakeApi *fake)
     api.clear_result = fake_clear_result;
     api.finish = fake_finish;
     api.result_primary_message = fake_result_primary_message;
+    api.result_command_tuples = fake_result_command_tuples;
     return api;
 }
 
@@ -881,6 +887,7 @@ static int test_single_row_and_late_error(void)
     VpsClientStatement *statement = NULL;
     const VpsClientRowView *row = NULL;
     VpsClientColumnView column;
+    VpsClientStatementMetadata metadata;
     uint64_t first_generation = 0U;
     size_t index;
     TEST_CHECK(test_fixture_init(&fixture, &platform, &platform_operations,
@@ -895,6 +902,7 @@ static int test_single_row_and_late_error(void)
     fixture.fake.stream_statuses[1] = VPS_LIBPQ_RESULT_SINGLE_TUPLE;
     fixture.fake.stream_statuses[2] = VPS_LIBPQ_RESULT_TUPLES_OK;
     fixture.fake.stream_length = 3U;
+    fixture.fake.command_tuples = "2";
     field.type_oid = 23U;
     field.format = VPS_CLIENT_VALUE_TEXT;
     (void)memset(&spec, 0, sizeof(spec));
@@ -956,6 +964,12 @@ static int test_single_row_and_late_error(void)
                        VPS_CLIENT_OK &&
                    vps_client_statement_state(statement) ==
                        VPS_CLIENT_STATEMENT_COMPLETE &&
+                   vps_client_statement_metadata(statement, &metadata,
+                                                 &fixture.error) ==
+                       VPS_CLIENT_OK &&
+                   metadata.published_row_count == 2U &&
+                   metadata.affected_count_valid &&
+                   metadata.affected_count == 2U &&
                    fixture.fake.single_row_count == 1U &&
                    fixture.fake.clear_count == 3U,
                "stream_terminal");

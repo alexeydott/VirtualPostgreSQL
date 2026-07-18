@@ -792,6 +792,38 @@ target_link_libraries(vps_libpq_client_metadata PUBLIC vps_client vps_metadata)
 vps_apply_strict_warnings(vps_libpq_client_metadata)
 vps_apply_asan(vps_libpq_client_metadata)
 
+add_library(vps_table_metadata STATIC
+  src/vps_table_metadata.c
+)
+target_compile_features(vps_table_metadata PUBLIC c_std_11)
+set_target_properties(vps_table_metadata PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_table_metadata PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_table_metadata PUBLIC
+  vps_client vps_libpq_client_metadata vps_metadata vps_type_registry)
+vps_apply_strict_warnings(vps_table_metadata)
+vps_apply_asan(vps_table_metadata)
+
+add_library(vps_dml STATIC
+  src/vps_dml.c
+)
+target_compile_features(vps_dml PUBLIC c_std_11)
+set_target_properties(vps_dml PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_dml PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_dml PUBLIC
+  vps_row_identity vps_table_metadata vps_type_registry)
+vps_apply_strict_warnings(vps_dml)
+vps_apply_asan(vps_dml)
+
 if(EXISTS "${VPS_LIBPQ_INCLUDE_DIR}/libpq-fe.h" AND
    EXISTS "${VPS_LIBPQ_LIBRARY_DIR}/libpq.lib")
   add_library(vps_libpq_client_conninfo STATIC
@@ -935,10 +967,12 @@ if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
     vps_identity
     vps_libpq_client
     vps_libpq_client_conninfo
+    vps_dml
     vps_planner
     vps_query_metadata
     vps_query_validation
     vps_row_identity
+    vps_table_metadata
     vps_type_codec
   )
   if(TARGET vps_query_cache)
@@ -1031,6 +1065,14 @@ if(BUILD_TESTING)
   vps_apply_strict_warnings(vps_row_identity_test)
   vps_apply_asan(vps_row_identity_test)
   add_test(NAME vps_row_identity COMMAND vps_row_identity_test)
+
+  add_executable(vps_dml_test tests/unit/vps_dml_test.c)
+  target_compile_features(vps_dml_test PRIVATE c_std_11)
+  set_target_properties(vps_dml_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_dml_test PRIVATE vps_dml)
+  vps_apply_strict_warnings(vps_dml_test)
+  vps_apply_asan(vps_dml_test)
+  add_test(NAME vps_dml COMMAND vps_dml_test)
 
   add_executable(vps_platform_contract_test
     tests/unit/vps_platform_contract_test.c
@@ -1465,6 +1507,7 @@ if(BUILD_TESTING)
       vps_connection_pool
       vps_cancel
       vps_cursor
+      vps_dml
       vps_identity
       vps_libpq_client
       vps_libpq_client_conninfo
@@ -1472,6 +1515,7 @@ if(BUILD_TESTING)
       vps_query_metadata
       vps_query_validation
       vps_row_identity
+      vps_table_metadata
       vps_type_codec
     )
     if(TARGET vps_query_cache)

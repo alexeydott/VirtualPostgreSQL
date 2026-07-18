@@ -165,12 +165,17 @@ typedef struct VpsClientStatementSpec {
     /* Optional statement-scoped probe overrides the client-wide probe. */
     VpsInterruptProbe interrupt_probe;
     void *interrupt_context;
+    /* NONE preserves QUERY mapping; DML selects constraint-aware mapping. */
+    VpsErrorOperation error_operation;
 } VpsClientStatementSpec;
 
 typedef struct VpsClientStatementMetadata {
     size_t parameter_count;
     size_t result_field_count;
     uint64_t query_fingerprint;
+    uint64_t published_row_count;
+    uint64_t affected_count;
+    int affected_count_valid;
     int described;
 } VpsClientStatementMetadata;
 

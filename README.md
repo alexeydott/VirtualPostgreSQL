@@ -6,7 +6,7 @@
 VirtualPostgreSQL is a portable C11 SQLite Virtual Table extension for PostgreSQL.
 The project is under staged implementation. The Windows foundation now includes
 the extension ABI, secure connection/session runtime, async client port,
-versioned PostgreSQL metadata, the end-to-end read-only virtual table path,
+versioned PostgreSQL metadata, the end-to-end virtual table path,
 conservative predicate/projection/order/limit pushdown, bounded streaming and
 database-scoped cancellation.
 
@@ -46,6 +46,7 @@ variables and do not read table rows. Product TLS policy remains
 | [Table metadata](docs/table-metadata.md) | Catalog snapshots, keys and fingerprints |
 | [Query sources](docs/query-sources.md) | Bounded query admission and read-only boundary |
 | [Read-only virtual table](docs/read-only-vtable.md) | SQLite callbacks, codecs, streaming and row identity |
+| [DML and stable identity](docs/dml-identity.md) | Keyed INSERT/UPDATE/DELETE, defaults and optimistic locking |
 | [Planner and pushdown](docs/planner-pushdown.md) | Compiled plans, exactness, projection, ordering and cost |
 | [Streaming and cancellation](docs/streaming-cancellation.md) | Cursor states, limits, cleanup, cancel API and concurrency gates |
 

@@ -46,7 +46,8 @@ static int vps_exec_expect(sqlite3 *database, const char *sql)
         (void)fprintf(stderr,
                       "[host] level=error operation=exec result=%d class=sqlite message=%.255s\n",
                       result,
-                      error_message != NULL ? error_message : "unavailable");
+                      error_message != NULL && error_message[0] != '\0'
+                          ? error_message : sqlite3_errmsg(database));
         sqlite3_free(error_message);
         return 0;
     }
@@ -488,6 +489,83 @@ static int vps_runtime_contour(sqlite3 *database,
     return passed;
 }
 
+static int vps_dml_contour(sqlite3 *database, const char *connstr)
+{
+    char *sql;
+    int passed = 1;
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_dml USING VirtualPostgreSQL("
+        "connstr=%Q,source=table,schema=public,table=vps_stage11_dml,mode=rw,"
+        "optimistic_lock=column,version_column=version)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_exec_expect(
+        database, "INSERT INTO vps_dml(__vps_omit) VALUES('*')");
+    passed &= vps_query_text(
+        database,
+        "SELECT payload||':'||version||':'||generated FROM vps_dml "
+        "WHERE payload='defaulted'",
+        "defaulted:1:defaulted:1");
+    passed &= vps_exec_expect(
+        database,
+        "INSERT INTO vps_dml(payload,nullable,bytes,amount,version,__vps_omit) "
+        "VALUES('explicit',NULL,X'0041','12.3400',1,'id,generated')");
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST(nullable IS NULL AS TEXT)||':'||hex(bytes)||':'||amount "
+        "FROM vps_dml WHERE payload='explicit'",
+        "1:0041:12.3400");
+    passed &= vps_exec_expect(
+        database,
+        "UPDATE vps_dml SET payload='updated',version=version+1 "
+        "WHERE payload='explicit'");
+    passed &= vps_query_text(
+        database,
+        "SELECT payload||':'||version||':'||generated FROM vps_dml "
+        "WHERE payload='updated'",
+        "updated:2:updated:2");
+    passed &= vps_exec_expect(database,
+                              "DELETE FROM vps_dml WHERE payload='defaulted'");
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_dml_xmin USING VirtualPostgreSQL("
+        "connstr=%Q,source=table,schema=public,table=vps_stage11_dml,mode=rw,"
+        "optimistic_lock=xmin)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_exec_expect(
+        database,
+        "UPDATE vps_dml_xmin SET nullable='xmin-ok' WHERE payload='updated'");
+    passed &= vps_query_text(database,
+                             "SELECT nullable FROM vps_dml_xmin "
+                             "WHERE payload='updated'", "xmin-ok");
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_dml_composite USING VirtualPostgreSQL("
+        "connstr=%Q,source=table,schema=public,"
+        "table=vps_stage11_composite,mode=rw)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_exec_expect(
+        database,
+        "INSERT INTO vps_dml_composite(tenant,code,payload,__vps_omit) "
+        "VALUES('a',7,'before','')");
+    passed &= vps_exec_expect(
+        database,
+        "UPDATE vps_dml_composite SET code=8,payload='after' "
+        "WHERE tenant='a' AND code=7");
+    passed &= vps_query_text(
+        database,
+        "SELECT tenant||':'||code||':'||payload FROM vps_dml_composite",
+        "a:8:after");
+    passed &= vps_exec_expect(
+        database, "DELETE FROM vps_dml_composite WHERE tenant='a' AND code=8");
+    (void)printf("[host] level=info operation=dml-contour status=%s\n",
+                 passed ? "passed" : "failed");
+    return passed;
+}
+
 static char *vps_runtime_connstr(void)
 {
 #if defined(_WIN32)
@@ -591,8 +669,11 @@ int main(int argument_count, char **arguments)
         sqlite3_free(error_message);
         error_message = NULL;
         passed &= vps_query_text(database, "PRAGMA integrity_check", "ok");
-        if (runtime_connstr != NULL && runtime_connstr[0] != '\0')
+        if (runtime_connstr != NULL && runtime_connstr[0] != '\0') {
             passed &= vps_runtime_contour(database, runtime_connstr, cancel);
+            if (vps_environment_enabled("VPS_VTAB_TEST_DML"))
+                passed &= vps_dml_contour(database, runtime_connstr);
+        }
     }
     result = sqlite3_close(database);
     passed &= result == SQLITE_OK;
