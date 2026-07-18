@@ -688,6 +688,141 @@ static int vps_transaction_contour(sqlite3 *database, const char *connstr)
     return passed;
 }
 
+static int vps_spatial_contour(sqlite3 *database, const char *connstr)
+{
+    char *sql;
+    int passed = 1;
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_spatial_wkt USING VirtualPostgreSQL("
+        "connstr=%Q,source=table,schema=public,table=vps_stage13_spatial,"
+        "mode=rw,geometry=wkt,srid=4326)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_query_text(
+        database,
+        "SELECT geom||':'||geog FROM vps_spatial_wkt WHERE id=1",
+        "POINT Z (30 10 5):POINT(-71.060316 48.432044)");
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST(nullable_geom IS NULL AS TEXT)||':'||empty_geom "
+        "FROM vps_spatial_wkt WHERE id=1",
+        "1:GEOMETRYCOLLECTION EMPTY");
+    passed &= vps_exec_expect(
+        database,
+        "INSERT INTO vps_spatial_wkt(id,label,geom,geog,nullable_geom,"
+        "empty_geom,__vps_omit) VALUES(101,'roundtrip',"
+        "'POINT Z (11 12 13)','POINT(14 15)',NULL,'POINT EMPTY','')");
+    passed &= vps_query_text(
+        database,
+        "SELECT geom||':'||geog||':'||CAST(nullable_geom IS NULL AS TEXT)||"
+        "':'||empty_geom FROM vps_spatial_wkt WHERE id=101",
+        "POINT Z (11 12 13):POINT(14 15):1:POINT EMPTY");
+    passed &= vps_exec_expect(
+        database,
+        "UPDATE vps_spatial_wkt SET geom='POINT Z (21 22 23)' WHERE id=101");
+    passed &= vps_query_text(database,
+                             "SELECT geom FROM vps_spatial_wkt WHERE id=101",
+                             "POINT Z (21 22 23)");
+    passed &= vps_exec_expect_failure(
+        database,
+        "UPDATE vps_spatial_wkt SET geom='POINT Z (NaN 2 3)' WHERE id=101",
+        SQLITE_MISMATCH);
+
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_spatial_wkb USING VirtualPostgreSQL("
+        "connstr=%Q,source=table,schema=public,table=vps_stage13_spatial,"
+        "mode=rw,geometry=wkb,srid=4326)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST(typeof(geom) AS TEXT)||':'||CAST(length(geom)>20 AS TEXT) "
+        "FROM vps_spatial_wkb WHERE id=1", "blob:1");
+    passed &= vps_exec_expect(
+        database,
+        "INSERT INTO vps_spatial_wkb(id,label,geom,geog,__vps_omit) VALUES("
+        "102,'wkb',X'01E90300000000000000003E4000000000000024400000000000001440',"
+        "X'01010000003CDBA337DCC351C06D37C1374D374840',"
+        "'nullable_geom,empty_geom')");
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST((SELECT hex(geom) FROM vps_spatial_wkb WHERE id=1)="
+        "hex(geom) AS TEXT) FROM vps_spatial_wkb WHERE id=102", "1");
+
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_spatial_ewkt_query USING VirtualPostgreSQL("
+        "connstr=%Q,source=query,query=%Q,mode=ro,key_columns=id,"
+        "geometry=ewkt,srid=4326)", connstr,
+        "SELECT id,geom,geog FROM public.vps_stage13_spatial WHERE id=1");
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST(instr(geom,'SRID=4326;')=1 AS TEXT)||':'||"
+        "CAST(instr(geog,'SRID=4326;')=1 AS TEXT) FROM vps_spatial_ewkt_query",
+        "1:1");
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_spatial_ewkt USING VirtualPostgreSQL("
+        "connstr=%Q,source=table,schema=public,table=vps_stage13_spatial,"
+        "mode=rw,geometry=ewkt,srid=4326)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_exec_expect(
+        database,
+        "INSERT INTO vps_spatial_ewkt(id,label,geom,geog,__vps_omit) VALUES("
+        "103,'ewkt','SRID=4326;POINT Z (30 10 5)',"
+        "'SRID=4326;POINT(-71.060316 48.432044)',"
+        "'nullable_geom,empty_geom')");
+    passed &= vps_query_text(
+        database, "SELECT CAST(instr(geom,'SRID=4326;')=1 AS TEXT) "
+                  "FROM vps_spatial_ewkt WHERE id=103", "1");
+
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_spatial_ewkb USING VirtualPostgreSQL("
+        "connstr=%Q,source=table,schema=public,table=vps_stage13_spatial,"
+        "mode=rw,geometry=ewkb,srid=4326)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST(typeof(geom) AS TEXT)||':'||CAST(length(geom)>24 AS TEXT) "
+        "FROM vps_spatial_ewkb WHERE id=1", "blob:1");
+    passed &= vps_exec_expect(
+        database,
+        "INSERT INTO vps_spatial_ewkb(id,label,geom,geog,__vps_omit) VALUES("
+        "104,'ewkb',X'01010000A0E61000000000000000003E4000000000000024400000000000001440',"
+        "X'0101000020E61000003CDBA337DCC351C06D37C1374D374840',"
+        "'nullable_geom,empty_geom')");
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST((SELECT hex(geom) FROM vps_spatial_ewkb WHERE id=1)="
+        "hex(geom) AS TEXT) FROM vps_spatial_ewkb WHERE id=104", "1");
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_spatialite_unavailable USING "
+        "VirtualPostgreSQL(connstr=%Q,source=table,schema=public,"
+        "table=vps_stage13_spatial,mode=ro,geometry=spatialite)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect_failure(database, sql, SQLITE_ERROR);
+    sqlite3_free(sql);
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_spatial_bad_srid USING "
+        "VirtualPostgreSQL(connstr=%Q,source=table,schema=public,"
+        "table=vps_stage13_spatial,mode=ro,geometry=wkt,srid=3857)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect_failure(database, sql, SQLITE_ERROR);
+    sqlite3_free(sql);
+    passed &= vps_exec_expect(
+        database, "DELETE FROM vps_spatial_wkt WHERE id BETWEEN 101 AND 104");
+    (void)printf("[host] level=info operation=spatial-contour status=%s\n",
+                 passed ? "passed" : "failed");
+    return passed;
+}
+
 static char *vps_runtime_connstr(void)
 {
 #if defined(_WIN32)
@@ -797,6 +932,8 @@ int main(int argument_count, char **arguments)
                 passed &= vps_dml_contour(database, runtime_connstr);
             if (vps_environment_enabled("VPS_VTAB_TEST_TRANSACTIONS"))
                 passed &= vps_transaction_contour(database, runtime_connstr);
+            if (vps_environment_enabled("VPS_VTAB_TEST_SPATIAL"))
+                passed &= vps_spatial_contour(database, runtime_connstr);
         }
     }
     result = sqlite3_close(database);

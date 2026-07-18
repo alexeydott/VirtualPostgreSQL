@@ -762,6 +762,37 @@ target_link_libraries(vps_type_codec PUBLIC vps_client vps_type_registry)
 vps_apply_strict_warnings(vps_type_codec)
 vps_apply_asan(vps_type_codec)
 
+add_library(vps_spatial STATIC
+  src/vps_spatial.c
+)
+target_compile_features(vps_spatial PUBLIC c_std_11)
+set_target_properties(vps_spatial PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_spatial PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_spatial PUBLIC vps_metadata)
+vps_apply_strict_warnings(vps_spatial)
+vps_apply_asan(vps_spatial)
+
+add_library(vps_spatial_client STATIC
+  src/vps_spatial_client.c
+)
+target_compile_features(vps_spatial_client PUBLIC c_std_11)
+set_target_properties(vps_spatial_client PROPERTIES
+  C_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+)
+target_include_directories(vps_spatial_client PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(vps_spatial_client PUBLIC
+  vps_client vps_libpq_client_metadata vps_spatial)
+vps_apply_strict_warnings(vps_spatial_client)
+vps_apply_asan(vps_spatial_client)
+
 add_library(vps_row_identity STATIC
   src/vps_row_identity.c
 )
@@ -820,7 +851,7 @@ target_include_directories(vps_dml PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
 )
 target_link_libraries(vps_dml PUBLIC
-  vps_row_identity vps_table_metadata vps_type_registry)
+  vps_row_identity vps_spatial vps_table_metadata vps_type_registry)
 vps_apply_strict_warnings(vps_dml)
 vps_apply_asan(vps_dml)
 
@@ -988,6 +1019,8 @@ if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
     vps_query_metadata
     vps_query_validation
     vps_row_identity
+    vps_spatial
+    vps_spatial_client
     vps_table_metadata
     vps_type_codec
   )
@@ -1097,6 +1130,14 @@ if(BUILD_TESTING)
   vps_apply_strict_warnings(vps_transaction_test)
   vps_apply_asan(vps_transaction_test)
   add_test(NAME vps_transaction COMMAND vps_transaction_test)
+
+  add_executable(vps_spatial_test tests/unit/vps_spatial_test.c)
+  target_compile_features(vps_spatial_test PRIVATE c_std_11)
+  set_target_properties(vps_spatial_test PROPERTIES C_EXTENSIONS OFF)
+  target_link_libraries(vps_spatial_test PRIVATE vps_spatial)
+  vps_apply_strict_warnings(vps_spatial_test)
+  vps_apply_asan(vps_spatial_test)
+  add_test(NAME vps_spatial COMMAND vps_spatial_test)
 
   add_executable(vps_platform_contract_test
     tests/unit/vps_platform_contract_test.c
@@ -1540,6 +1581,8 @@ if(BUILD_TESTING)
       vps_query_metadata
       vps_query_validation
       vps_row_identity
+      vps_spatial
+      vps_spatial_client
       vps_table_metadata
       vps_type_codec
     )

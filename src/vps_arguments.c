@@ -27,7 +27,7 @@ static const VpsArgumentDefinition vps_argument_definitions[] = {
     {"key_columns", VPS_ARGUMENT_TYPE_STRING, 2048U, 0},
     {"optimistic_lock", VPS_ARGUMENT_TYPE_STRING, 255U, 0},
     {"version_column", VPS_ARGUMENT_TYPE_STRING, 255U, 0},
-    {"geometry", VPS_ARGUMENT_TYPE_ENUM, 8U, 0},
+    {"geometry", VPS_ARGUMENT_TYPE_ENUM, 10U, 0},
     {"srid", VPS_ARGUMENT_TYPE_UINT32, 10U, 0},
     {"connect_timeout", VPS_ARGUMENT_TYPE_UINT32, 10U, 0},
     {"statement_timeout", VPS_ARGUMENT_TYPE_UINT32, 10U, 0},
@@ -265,7 +265,8 @@ static int vps_argument_parse_enum(VpsArgumentId argument_id,
             return 1;
         }
     } else if (argument_id == VPS_ARGUMENT_ID_GEOMETRY) {
-        static const char *const names[] = {"wkt", "wkb", "ewkt", "ewkb"};
+        static const char *const names[] = {
+            "wkt", "wkb", "ewkt", "ewkb", "spatialite", "none"};
         size_t index;
         for (index = 0U; index < sizeof(names) / sizeof(names[0]); ++index) {
             if (strlen(names[index]) == length &&

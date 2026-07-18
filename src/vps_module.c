@@ -20,6 +20,8 @@ SQLITE_EXTENSION_INIT3
 #endif
 #include "vps_row_identity.h"
 #include "vps_session.h"
+#include "vps_spatial.h"
+#include "vps_spatial_client.h"
 #include "vps_table_metadata.h"
 #include "vps_tls_policy.h"
 #include "vps_transaction.h"
@@ -58,6 +60,12 @@ typedef struct VpsTable {
     VpsQueryDescribeResult described;
     VpsTableMetadata table_metadata;
     VpsDmlPolicy dml_policy;
+    VpsSpatialCapabilities spatial;
+    VpsSpatialFormat spatial_format;
+    unsigned char spatial_kind[VPS_PLAN_MAX_COLUMNS];
+    VpsSpatialGeometryType spatial_type[VPS_PLAN_MAX_COLUMNS];
+    uint32_t spatial_dimensions[VPS_PLAN_MAX_COLUMNS];
+    uint32_t spatial_srid[VPS_PLAN_MAX_COLUMNS];
     VpsClientResultFieldExpectation *expected_fields;
     size_t expected_fields_size;
     VpsBuffer scan_query;
@@ -75,6 +83,7 @@ typedef struct VpsTable {
     int has_hidden_identity;
     int initialized_table_metadata;
     int initialized_dml_policy;
+    int initialized_spatial;
     uint64_t table_id;
     uint64_t next_cursor_id;
     size_t active_cursors;
@@ -717,6 +726,8 @@ static int vps_table_cleanup(VpsTable *table)
         vps_query_describe_result_cleanup(&table->described);
     if (table->initialized_table_metadata)
         vps_table_metadata_reset(&table->table_metadata);
+    if (table->initialized_spatial)
+        vps_spatial_capabilities_reset(&table->spatial);
     vps_memory_release(&table->allocator, (void **)&table->expected_fields,
                        table->expected_fields_size);
     if (table->initialized_query) vps_buffer_reset(&table->scan_query);
@@ -1004,6 +1015,16 @@ static int vps_table_describe(VpsTable *table, VpsError *error)
         else
             table->initialized_table_metadata = 1;
     }
+    if (result == SQLITE_OK) {
+        VpsSpatialResult spatial_result = vps_spatial_capabilities_load(
+            &table->spatial, connection, &table->allocator, &table->logger,
+            error);
+        if (spatial_result == VPS_SPATIAL_OK ||
+            spatial_result == VPS_SPATIAL_NOT_AVAILABLE)
+            table->initialized_spatial = 1;
+        else
+            result = SQLITE_ERROR;
+    }
     if (connection != NULL) (void)vps_client_connection_close(&connection);
     if (validation_initialized) vps_query_validation_cleanup(&validation);
     return result;
@@ -1030,8 +1051,143 @@ static int vps_table_build_dml_policy(VpsTable *table)
         &table->table_metadata, 1, table->optimistic_mode,
         version_column, version_length, &table->dml_policy);
     if (result != VPS_DML_OK) return 0;
+    table->dml_policy.spatial = &table->spatial;
+    table->dml_policy.spatial_format = table->spatial_format;
+    if (table->dml_policy.visible_count > VPS_PLAN_MAX_COLUMNS) return 0;
+    (void)memcpy(table->dml_policy.spatial_kind, table->spatial_kind,
+                 table->dml_policy.visible_count);
+    (void)memcpy(table->dml_policy.spatial_srid, table->spatial_srid,
+                 table->dml_policy.visible_count * sizeof(uint32_t));
+    {
+        size_t visible;
+        for (visible = 0U; visible < table->dml_policy.visible_count;
+             ++visible) {
+            const VpsColumnMetadata *column;
+            if (table->dml_policy.spatial_kind[visible] == 0U ||
+                table->spatial_format == VPS_SPATIAL_FORMAT_NONE)
+                continue;
+            column = &table->table_metadata.columns.columns[
+                table->dml_policy.visible_to_metadata[visible]];
+            table->dml_policy.selections[visible].capabilities |=
+                VPS_CODEC_CAP_DML;
+            if (column->generated_kind == '\0') {
+                table->dml_policy.updatable[visible] =
+                    column->identity_kind == '\0';
+                table->dml_policy.insertable[visible] =
+                    column->identity_kind != 'a';
+            }
+        }
+    }
     table->initialized_dml_policy = 1;
     return 1;
+}
+
+static VpsSpatialFormat vps_table_spatial_format(const VpsTable *table)
+{
+    const VpsArgumentValue *value = vps_arguments_get(
+        &table->arguments, VPS_ARGUMENT_ID_GEOMETRY);
+    if (value == NULL || !value->present) return VPS_SPATIAL_FORMAT_WKT;
+    switch (value->enum_value) {
+        case VPS_ARGUMENT_ENUM_GEOMETRY_WKB: return VPS_SPATIAL_FORMAT_WKB;
+        case VPS_ARGUMENT_ENUM_GEOMETRY_EWKT: return VPS_SPATIAL_FORMAT_EWKT;
+        case VPS_ARGUMENT_ENUM_GEOMETRY_EWKB: return VPS_SPATIAL_FORMAT_EWKB;
+        case VPS_ARGUMENT_ENUM_GEOMETRY_SPATIALITE:
+            return VPS_SPATIAL_FORMAT_SPATIALITE;
+        case VPS_ARGUMENT_ENUM_GEOMETRY_NONE: return VPS_SPATIAL_FORMAT_NONE;
+        case VPS_ARGUMENT_ENUM_GEOMETRY_WKT:
+        default: return VPS_SPATIAL_FORMAT_WKT;
+    }
+}
+
+static int vps_table_integrate_spatial(VpsTable *table)
+{
+    const VpsArgumentValue *srid_argument;
+    VpsBuffer projected;
+    uint32_t override_srid = 0U;
+    size_t index;
+    int has_spatial = 0;
+    int projected_initialized = 0;
+    if (table == NULL || !table->initialized_spatial ||
+        table->described.field_count > VPS_PLAN_MAX_COLUMNS)
+        return 0;
+    table->spatial_format = vps_table_spatial_format(table);
+    if (table->spatial_format == VPS_SPATIAL_FORMAT_SPATIALITE)
+        return 0;
+    srid_argument = vps_arguments_get(&table->arguments, VPS_ARGUMENT_ID_SRID);
+    if (srid_argument != NULL && srid_argument->present)
+        override_srid = srid_argument->uint32_value;
+    if (override_srid > INT32_MAX) return 0;
+    for (index = 0U; index < table->described.field_count; ++index) {
+        VpsQueryDescribeField *field = &table->described.fields[index];
+        VpsSpatialGeometryType typmod_type = VPS_SPATIAL_TYPE_ANY;
+        uint32_t typmod_dimensions = 0U;
+        uint32_t typmod_srid = 0U;
+        if (table->spatial.present &&
+            field->type_oid == table->spatial.geometry_oid)
+            table->spatial_kind[index] = 1U;
+        else if (table->spatial.present &&
+                 field->type_oid == table->spatial.geography_oid)
+            table->spatial_kind[index] = 2U;
+        else
+            continue;
+        if (vps_spatial_typmod_decode(field->type_modifier, &typmod_type,
+                                      &typmod_dimensions, &typmod_srid) !=
+            VPS_SPATIAL_OK)
+            return 0;
+        if (override_srid != 0U && typmod_srid != 0U &&
+            override_srid != typmod_srid)
+            return 0;
+        table->spatial_type[index] = typmod_type;
+        table->spatial_dimensions[index] = typmod_dimensions;
+        table->spatial_srid[index] = override_srid != 0U
+                                         ? override_srid : typmod_srid;
+        has_spatial = 1;
+    }
+    if (!has_spatial || table->spatial_format == VPS_SPATIAL_FORMAT_NONE)
+        return 1;
+    if (vps_buffer_init(&projected, &table->allocator,
+                        VPS_VTAB_QUERY_LIMIT) != VPS_MEMORY_OK)
+        return 0;
+    projected_initialized = 1;
+    if (!vps_append_bytes(&projected, "SELECT ", 7U)) goto fail;
+    for (index = 0U; index < table->described.field_count; ++index) {
+        VpsQueryDescribeField *field = &table->described.fields[index];
+        if (index != 0U && !vps_append_bytes(&projected, ",", 1U)) goto fail;
+        if (table->spatial_kind[index] != 0U) {
+            VpsSpatialExpression expression;
+            VpsSpatialKind kind = table->spatial_kind[index] == 1U
+                                      ? VPS_SPATIAL_KIND_GEOMETRY
+                                      : VPS_SPATIAL_KIND_GEOGRAPHY;
+            if (vps_spatial_read_expression(
+                    &table->spatial, kind, table->spatial_format,
+                    field->name, field->name_length, &expression) !=
+                    VPS_SPATIAL_OK ||
+                !vps_append_bytes(&projected, expression.sql,
+                                  expression.length) ||
+                !vps_append_bytes(&projected, " AS ", 4U) ||
+                !vps_append_pg_identifier(&projected, field->name,
+                                          field->name_length))
+                goto fail;
+            field->type_oid = expression.binary_result
+                                  ? UINT32_C(17) : UINT32_C(25);
+            field->type_modifier = -1;
+        } else if (!vps_append_pg_identifier(&projected, field->name,
+                                             field->name_length))
+            goto fail;
+    }
+    if (!vps_append_bytes(&projected, " FROM (", 7U) ||
+        !vps_append_bytes(&projected, (const char *)table->scan_query.data,
+                          table->scan_query.size) ||
+        !vps_append_bytes(&projected, ") AS vps_spatial_source", 23U) ||
+        !vps_append_bytes(&projected, "\0", 1U))
+        goto fail;
+    projected.size -= 1U;
+    vps_buffer_reset(&table->scan_query);
+    table->scan_query = projected;
+    return 1;
+fail:
+    if (projected_initialized) vps_buffer_reset(&projected);
+    return 0;
 }
 
 static const char *vps_sqlite_declared_type(uint32_t type_oid)
@@ -1203,7 +1359,25 @@ static uint64_t vps_vtab_source_fingerprint(const VpsTable *table)
             hash ^= (unsigned char)field->name[name_index];
             hash *= UINT64_C(1099511628211);
         }
+        hash ^= table->spatial_kind[index];
+        hash *= UINT64_C(1099511628211);
+        hash ^= (uint32_t)table->spatial_type[index];
+        hash *= UINT64_C(1099511628211);
+        hash ^= table->spatial_dimensions[index];
+        hash *= UINT64_C(1099511628211);
+        hash ^= table->spatial_srid[index];
+        hash *= UINT64_C(1099511628211);
     }
+    hash ^= table->spatial.namespace_oid;
+    hash *= UINT64_C(1099511628211);
+    hash ^= table->spatial.geometry_oid;
+    hash *= UINT64_C(1099511628211);
+    hash ^= table->spatial.geography_oid;
+    hash *= UINT64_C(1099511628211);
+    hash ^= table->spatial.flags;
+    hash *= UINT64_C(1099511628211);
+    hash ^= (uint32_t)table->spatial_format;
+    hash *= UINT64_C(1099511628211);
     return hash;
 }
 
@@ -1248,6 +1422,10 @@ static int vps_module_connect(sqlite3 *database,
             else
                 table->visible_field_count -= 1U;
         }
+    }
+    if (result == SQLITE_OK) {
+        failure = "spatial integration";
+        if (!vps_table_integrate_spatial(table)) result = SQLITE_ERROR;
     }
     failure = "DML policy";
     if (result == SQLITE_OK && !vps_table_build_dml_policy(table))
@@ -2898,6 +3076,62 @@ static int vps_dml_append_identity_parameter(
            vps_buffer_append(bytes, "\0", 1U) == VPS_MEMORY_OK;
 }
 
+static int vps_dml_append_srid_parameter(
+    VpsBuffer *bytes, uint32_t srid, VpsClientParameterView *parameter,
+    size_t *offset)
+{
+    char text[16];
+    int written;
+    if (srid > INT32_MAX) return 0;
+    written = snprintf(text, sizeof(text), "%u", (unsigned int)srid);
+    if (written <= 0 || (size_t)written >= sizeof(text)) return 0;
+    (void)memset(parameter, 0, sizeof(*parameter));
+    parameter->type_oid = UINT32_C(23);
+    parameter->format = VPS_CLIENT_VALUE_TEXT;
+    *offset = bytes->size;
+    if (vps_buffer_append(bytes, text, (size_t)written) != VPS_MEMORY_OK ||
+        vps_buffer_append(bytes, "\0", 1U) != VPS_MEMORY_OK)
+        return 0;
+    parameter->length = (size_t)written;
+    return 1;
+}
+
+static VpsSpatialResult vps_dml_validate_spatial_value(
+    const VpsTable *table, size_t visible, sqlite3_value *value)
+{
+    VpsSpatialLimits limits;
+    VpsSpatialValidation validation;
+    VpsSpatialResult spatial_result;
+    int sqlite_type;
+    if (table->spatial_kind[visible] == 0U ||
+        table->spatial_format == VPS_SPATIAL_FORMAT_NONE)
+        return VPS_SPATIAL_OK;
+    sqlite_type = sqlite3_value_type(value);
+    if (sqlite_type == SQLITE_NULL) return VPS_SPATIAL_OK;
+    limits.max_bytes = VPS_SPATIAL_DEFAULT_MAX_BYTES;
+    limits.max_points = VPS_SPATIAL_DEFAULT_MAX_POINTS;
+    limits.max_depth = VPS_SPATIAL_DEFAULT_MAX_DEPTH;
+    if (table->spatial_format == VPS_SPATIAL_FORMAT_WKT ||
+        table->spatial_format == VPS_SPATIAL_FORMAT_EWKT) {
+        if (sqlite_type != SQLITE_TEXT) return VPS_SPATIAL_INVALID_ARGUMENT;
+        spatial_result = vps_spatial_validate_text(
+            (const char *)sqlite3_value_text(value),
+            (size_t)sqlite3_value_bytes(value), table->spatial_format,
+            table->spatial_type[visible], table->spatial_srid[visible],
+            &limits, &validation);
+    } else {
+        if (sqlite_type != SQLITE_BLOB) return VPS_SPATIAL_INVALID_ARGUMENT;
+        spatial_result = vps_spatial_validate_binary(
+            sqlite3_value_blob(value), (size_t)sqlite3_value_bytes(value),
+            table->spatial_format, table->spatial_type[visible],
+            table->spatial_srid[visible], &limits, &validation);
+    }
+    if (spatial_result != VPS_SPATIAL_OK) return spatial_result;
+    return table->spatial_dimensions[visible] == 0U ||
+                   table->spatial_dimensions[visible] == validation.dimensions
+               ? VPS_SPATIAL_OK : VPS_SPATIAL_UNSUPPORTED;
+}
+
 static int vps_module_update(sqlite3_vtab *base,
                              int argument_count,
                              sqlite3_value **arguments,
@@ -2923,6 +3157,7 @@ static int vps_module_update(sqlite3_vtab *base,
     VpsDmlResult dml_result;
     const VpsClientRowView *row = NULL;
     char integer_identity[32];
+    char spatial_failure[64];
     size_t index;
     int error_initialized = 0;
     int plan_initialized = 0;
@@ -2974,6 +3209,24 @@ static int vps_module_update(sqlite3_vtab *base,
         result = SQLITE_CORRUPT_VTAB;
         goto cleanup;
     }
+    if (operation != VPS_DML_DELETE) {
+        for (index = 0U; index < table->visible_field_count; ++index) {
+            VpsSpatialResult spatial_result;
+            if (!included[index]) continue;
+            spatial_result = vps_dml_validate_spatial_value(
+                table, index, arguments[2U + index]);
+            if (spatial_result != VPS_SPATIAL_OK) {
+                int written = snprintf(
+                    spatial_failure, sizeof(spatial_failure), "%s column=%u",
+                    vps_spatial_result_name(spatial_result),
+                    (unsigned int)index);
+                failure = written > 0 && (size_t)written < sizeof(spatial_failure)
+                              ? spatial_failure : "spatial validation";
+                result = SQLITE_MISMATCH;
+                goto cleanup;
+            }
+        }
+    }
     dml_result = vps_dml_plan_build(
         &table->allocator, &table->dml_policy, operation,
         operation == VPS_DML_DELETE ? NULL : included,
@@ -3001,6 +3254,10 @@ static int vps_module_update(sqlite3_vtab *base,
         if (slot->source == VPS_DML_PARAMETER_NEW_VALUE)
             appended = vps_dml_append_parameter(
                 &parameter_bytes, arguments[2U + slot->index], slot->type_oid,
+                &parameters[index], &offsets[index]);
+        else if (slot->source == VPS_DML_PARAMETER_SPATIAL_SRID)
+            appended = vps_dml_append_srid_parameter(
+                &parameter_bytes, table->spatial_srid[slot->index],
                 &parameters[index], &offsets[index]);
         else if (slot->source == VPS_DML_PARAMETER_OLD_KEY)
             appended = vps_dml_append_identity_parameter(

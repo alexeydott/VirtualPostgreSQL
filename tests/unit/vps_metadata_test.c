@@ -239,19 +239,19 @@ static int test_relation_resolution(void)
 
 static int test_column_metadata(void)
 {
-    static const char *first[38] = {
+    static const char *first[39] = {
         "1", "id", "23", "-1", "11", "pg_catalog", "int4", "N",
         "b", "0", "-1", "0", "t", "f", "t", "", "a", "0",
         NULL, NULL, NULL, "p", "", "-1", "f", "41000", "1", "f",
         NULL, NULL, NULL, NULL, NULL, "0123456789abcdef0123456789abcdef",
-        "s", "f", NULL, NULL};
-    static const char *second[38] = {
+        "s", "f", NULL, NULL, "integer"};
+    static const char *second[39] = {
         "2", "amount", "50000", "-1", "2200", "public", "money_domain",
         "N", "d", "1700", "-1", "0", "f", "t", "f", "s", "", "100",
         "C", "c", "t", "m", "p", "10", "t", "41000", "2", "t",
         "11", "pg_catalog", "numeric", "N", "b", NULL,
         "g", "t", "fedcba9876543210fedcba9876543210",
-        "00112233445566778899aabbccddeeff"};
+        "00112233445566778899aabbccddeeff", "public.money_domain"};
     VpsAllocator allocator;
     VpsMetadataRowSet rowset;
     VpsColumnSet columns;
@@ -262,14 +262,14 @@ static int test_column_metadata(void)
     size_t field;
     (void)memset(&source, 0, sizeof(source));
     source.rows = 2U;
-    source.fields = 38U;
-    for (field = 0U; field < 38U; ++field) {
+    source.fields = 39U;
+    for (field = 0U; field < 39U; ++field) {
         source.values[0][field] = first[field];
         source.values[1][field] = second[field];
     }
     input.context = &source;
     input.row_count = 2U;
-    input.field_count = 38U;
+    input.field_count = 39U;
     input.is_null = test_input_is_null;
     input.value = test_input_value;
     input.length = test_input_length;

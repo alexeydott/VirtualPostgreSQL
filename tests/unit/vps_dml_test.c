@@ -44,6 +44,7 @@ int main(void)
     VpsTableMetadata metadata;
     VpsDmlPolicy policy;
     VpsDmlPlan plan;
+    VpsSpatialCapabilities spatial;
     VpsRowIdentityField keys[1];
     VpsRowIdentityField version;
     VpsRowIdentitySpec identity_spec;
@@ -53,6 +54,7 @@ int main(void)
     int relation_initialized = 0;
     int columns_initialized = 0;
     int token_initialized = 0;
+    int spatial_initialized = 0;
     int passed = 0;
     (void)memset(&metadata, 0, sizeof(metadata));
     (void)memset(&plan, 0, sizeof(plan));
@@ -102,6 +104,29 @@ int main(void)
     CHECK(strstr((const char *)plan.query.data, "\"payload\",\"bytes\"") != NULL);
     CHECK(plan.parameter_count == 2U && plan.returning_count == 2U);
     vps_dml_plan_reset(&plan);
+    CHECK(vps_spatial_capabilities_init(&spatial, &allocator, NULL) ==
+          VPS_SPATIAL_OK);
+    spatial_initialized = 1;
+    CHECK(vps_buffer_append(&spatial.schema, "geo", 3U) == VPS_MEMORY_OK);
+    spatial.present = 1;
+    spatial.flags = UINT32_MAX;
+    policy.spatial = &spatial;
+    policy.spatial_format = VPS_SPATIAL_FORMAT_WKT;
+    policy.spatial_kind[1] = 1U;
+    policy.spatial_srid[1] = 4326U;
+    included[1] = 1U;
+    included[2] = 0U;
+    CHECK(vps_dml_plan_build(&allocator, &policy, VPS_DML_INSERT, included,
+                             4U, NULL, &plan) == VPS_DML_OK);
+    CHECK(strstr((const char *)plan.query.data,
+                 "\"geo\".ST_GeomFromText($1::pg_catalog.text,"
+                 "$2::pg_catalog.int4)") != NULL &&
+          plan.parameter_count == 2U &&
+          plan.parameters[0].source == VPS_DML_PARAMETER_NEW_VALUE &&
+          plan.parameters[0].type_oid == 25U &&
+          plan.parameters[1].source == VPS_DML_PARAMETER_SPATIAL_SRID);
+    vps_dml_plan_reset(&plan);
+    policy.spatial_kind[1] = 0U;
 
     (void)memset(keys, 0, sizeof(keys));
     (void)memset(&version, 0, sizeof(version));
@@ -157,6 +182,7 @@ int main(void)
 cleanup:
     vps_dml_plan_reset(&plan);
     if (token_initialized) vps_buffer_reset(&token);
+    if (spatial_initialized) vps_spatial_capabilities_reset(&spatial);
     if (columns_initialized) vps_column_set_reset(&metadata.columns);
     if (relation_initialized) vps_relation_metadata_reset(&metadata.relation);
     if (passed) (void)printf("vps_dml_test: passed\n");

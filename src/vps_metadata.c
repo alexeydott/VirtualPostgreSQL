@@ -42,6 +42,7 @@ static const char vps_columns_sql[] =
     "dc.convalidated::pg_catalog.text,dc.connoinherit::pg_catalog.text,"
     "dc.conbin::pg_catalog.text)),',' ORDER BY dc.oid)) "
     "FROM pg_catalog.pg_constraint dc WHERE dc.contypid=t.oid)::pg_catalog.text "
+    ",pg_catalog.format_type(a.atttypid,a.atttypmod)::pg_catalog.text "
     "FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid=a.atttypid "
     "JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace "
     "LEFT JOIN pg_catalog.pg_type bt ON bt.oid=NULLIF(t.typbasetype,0) "
@@ -75,15 +76,38 @@ static const char vps_policy_sql[] =
     "LEFT JOIN pg_catalog.pg_partitioned_table p ON p.partrelid=c.oid "
     "WHERE c.oid=$1::pg_catalog.oid ORDER BY i.inhseqno";
 
+static const char vps_postgis_sql[] =
+    "SELECT e.extversion::pg_catalog.text,e.extnamespace::pg_catalog.text,"
+    "n.nspname::pg_catalog.text,COALESCE(g.oid,0)::pg_catalog.text,"
+    "COALESCE(gg.oid,0)::pg_catalog.text,"
+    "(EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace=e.extnamespace AND p.proname='st_astext'))::pg_catalog.text,"
+    "(EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace=e.extnamespace AND p.proname='st_geomfromtext'))::pg_catalog.text,"
+    "(EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace=e.extnamespace AND p.proname='st_asbinary'))::pg_catalog.text,"
+    "(EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace=e.extnamespace AND p.proname='st_geomfromwkb'))::pg_catalog.text,"
+    "(EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace=e.extnamespace AND p.proname='st_asewkt'))::pg_catalog.text,"
+    "(EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace=e.extnamespace AND p.proname='st_geomfromewkt'))::pg_catalog.text,"
+    "(EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace=e.extnamespace AND p.proname='st_asewkb'))::pg_catalog.text,"
+    "(EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace=e.extnamespace AND p.proname='st_geomfromewkb'))::pg_catalog.text,"
+    "(EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace=e.extnamespace AND p.proname='st_geogfromtext'))::pg_catalog.text,"
+    "(EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace=e.extnamespace AND p.proname='st_geogfromwkb'))::pg_catalog.text "
+    "FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace "
+    "LEFT JOIN pg_catalog.pg_type g ON g.typnamespace=e.extnamespace AND g.typname='geometry' "
+    "AND EXISTS(SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::pg_catalog.regclass AND d.objid=g.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.refobjid=e.oid AND d.deptype='e') "
+    "LEFT JOIN pg_catalog.pg_type gg ON gg.typnamespace=e.extnamespace AND gg.typname='geography' "
+    "AND EXISTS(SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::pg_catalog.regclass AND d.objid=gg.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.refobjid=e.oid AND d.deptype='e') "
+    "WHERE e.extname=$1::pg_catalog.name";
+
 static const VpsCatalogQuerySpec vps_catalog_specs[VPS_CATALOG_QUERY_COUNT] = {
     {VPS_CATALOG_QUERY_RELATION, vps_relation_sql,
      sizeof(vps_relation_sql) - 1U, 2U, 12U},
     {VPS_CATALOG_QUERY_COLUMNS, vps_columns_sql,
-     sizeof(vps_columns_sql) - 1U, 1U, 38U},
+     sizeof(vps_columns_sql) - 1U, 1U, 39U},
     {VPS_CATALOG_QUERY_KEYS, vps_keys_sql,
      sizeof(vps_keys_sql) - 1U, 1U, 16U},
     {VPS_CATALOG_QUERY_RELATION_POLICY, vps_policy_sql,
-     sizeof(vps_policy_sql) - 1U, 1U, 10U}};
+     sizeof(vps_policy_sql) - 1U, 1U, 10U},
+    {VPS_CATALOG_QUERY_POSTGIS, vps_postgis_sql,
+     sizeof(vps_postgis_sql) - 1U, 1U, 15U}};
 
 static void vps_metadata_log(VpsMetadataRowSet *rowset,
                              VpsCatalogQuery query,
@@ -671,7 +695,7 @@ VpsMetadataResult vps_column_set_build(VpsColumnSet *columns,
     size_t columns_bytes;
     size_t row;
     if (columns == NULL || !columns->initialized || rowset == NULL ||
-        !rowset->initialized || rowset->field_count != 38U)
+        !rowset->initialized || rowset->field_count != 39U)
         return VPS_METADATA_INVALID_ARGUMENT;
     if (vps_size_multiply(rowset->row_count, sizeof(VpsColumnMetadata),
                           &columns_bytes) != VPS_MEMORY_OK)
@@ -691,12 +715,12 @@ VpsMetadataResult vps_column_set_build(VpsColumnSet *columns,
         (void)memset(candidate.columns, 0, columns_bytes);
     for (row = 0U; row < rowset->row_count; ++row) {
         VpsColumnMetadata *column = &candidate.columns[row];
-        const unsigned char *value[38];
-        size_t length[38];
-        int present[38];
+        const unsigned char *value[39];
+        size_t length[39];
+        int present[39];
         size_t field;
         VpsMetadataResult append_result;
-        for (field = 0U; field < 38U; ++field) {
+        for (field = 0U; field < 39U; ++field) {
             if (!vps_metadata_optional_cell(rowset, row, field,
                                             &value[field], &length[field],
                                             &present[field])) goto invalid;
@@ -818,6 +842,10 @@ VpsMetadataResult vps_column_set_build(VpsColumnSet *columns,
             append_result = vps_column_string_append(
                 &candidate, &column->domain_constraint_hash, value[37],
                 length[37], present[37]);
+        if (append_result == VPS_METADATA_OK)
+            append_result = vps_column_string_append(
+                &candidate, &column->formatted_type, value[38],
+                length[38], present[38]);
         if (append_result != VPS_METADATA_OK) {
             vps_column_set_reset(&candidate);
             return append_result;
@@ -894,6 +922,7 @@ const char *vps_catalog_query_name(VpsCatalogQuery query)
         case VPS_CATALOG_QUERY_COLUMNS: return "catalog_columns";
         case VPS_CATALOG_QUERY_KEYS: return "catalog_keys";
         case VPS_CATALOG_QUERY_RELATION_POLICY: return "catalog_policy";
+        case VPS_CATALOG_QUERY_POSTGIS: return "catalog_postgis";
         default: return "catalog_unknown";
     }
 }

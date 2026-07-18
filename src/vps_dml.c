@@ -176,6 +176,49 @@ static VpsDmlResult vps_dml_add_parameter(VpsDmlPlan *plan,
     return VPS_DML_OK;
 }
 
+static VpsDmlResult vps_dml_write_value(VpsDmlPlan *plan,
+                                        const VpsDmlPolicy *policy,
+                                        size_t visible)
+{
+    uint32_t value_parameter = (uint32_t)plan->parameter_count + 1U;
+    if (policy->spatial_kind[visible] != 0U &&
+        policy->spatial_format != VPS_SPATIAL_FORMAT_NONE) {
+        VpsSpatialExpression expression;
+        VpsSpatialKind kind = policy->spatial_kind[visible] == 1U
+                                  ? VPS_SPATIAL_KIND_GEOMETRY
+                                  : VPS_SPATIAL_KIND_GEOGRAPHY;
+        uint32_t srid_parameter =
+            policy->spatial_format == VPS_SPATIAL_FORMAT_WKT ||
+                    policy->spatial_format == VPS_SPATIAL_FORMAT_WKB
+                ? value_parameter + 1U : 0U;
+        uint32_t value_oid =
+            policy->spatial_format == VPS_SPATIAL_FORMAT_WKB ||
+                    policy->spatial_format == VPS_SPATIAL_FORMAT_EWKB
+                ? UINT32_C(17) : UINT32_C(25);
+        if (policy->spatial == NULL ||
+            vps_spatial_write_expression(
+                policy->spatial, kind, policy->spatial_format,
+                value_parameter, srid_parameter, &expression) !=
+                VPS_SPATIAL_OK ||
+            !vps_dml_append(&plan->query, expression.sql,
+                            expression.length) ||
+            vps_dml_add_parameter(plan, VPS_DML_PARAMETER_NEW_VALUE,
+                                  visible, value_oid) != VPS_DML_OK)
+            return VPS_DML_OUT_OF_MEMORY;
+        if (srid_parameter != 0U &&
+            vps_dml_add_parameter(plan, VPS_DML_PARAMETER_SPATIAL_SRID,
+                                  visible, UINT32_C(23)) != VPS_DML_OK)
+            return VPS_DML_OUT_OF_MEMORY;
+        return VPS_DML_OK;
+    }
+    if (!vps_dml_placeholder(&plan->query, value_parameter) ||
+        vps_dml_add_parameter(
+            plan, VPS_DML_PARAMETER_NEW_VALUE, visible,
+            policy->selections[visible].declared_type_oid) != VPS_DML_OK)
+        return VPS_DML_OUT_OF_MEMORY;
+    return VPS_DML_OK;
+}
+
 static VpsDmlResult vps_dml_returning(VpsDmlPlan *plan,
                                       const VpsDmlPolicy *policy)
 {
@@ -339,11 +382,7 @@ VpsDmlResult vps_dml_plan_build(
                               visible < policy->visible_count; ++visible) {
                 if (!included_columns[visible]) continue;
                 if ((emitted++ != 0U && !vps_dml_append(&plan->query, ",", 1U)) ||
-                    !vps_dml_placeholder(&plan->query,
-                                         plan->parameter_count + 1U) ||
-                    vps_dml_add_parameter(
-                        plan, VPS_DML_PARAMETER_NEW_VALUE, visible,
-                        policy->selections[visible].declared_type_oid) != VPS_DML_OK)
+                    vps_dml_write_value(plan, policy, visible) != VPS_DML_OK)
                     result = VPS_DML_OUT_OF_MEMORY;
             }
             if (result == VPS_DML_OK &&
@@ -374,11 +413,7 @@ VpsDmlResult vps_dml_plan_build(
                 !vps_dml_column_name(policy, visible, &name, &length) ||
                 !vps_dml_identifier(&plan->query, name, length) ||
                 !vps_dml_append(&plan->query, "=", 1U) ||
-                !vps_dml_placeholder(&plan->query,
-                                     plan->parameter_count + 1U) ||
-                vps_dml_add_parameter(
-                    plan, VPS_DML_PARAMETER_NEW_VALUE, visible,
-                    policy->selections[visible].declared_type_oid) != VPS_DML_OK)
+                vps_dml_write_value(plan, policy, visible) != VPS_DML_OK)
                 result = VPS_DML_OUT_OF_MEMORY;
         }
         if (result == VPS_DML_OK && emitted == 0U)

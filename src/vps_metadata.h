@@ -34,7 +34,8 @@ typedef enum VpsCatalogQuery {
     VPS_CATALOG_QUERY_COLUMNS = 1,
     VPS_CATALOG_QUERY_KEYS = 2,
     VPS_CATALOG_QUERY_RELATION_POLICY = 3,
-    VPS_CATALOG_QUERY_COUNT = 4
+    VPS_CATALOG_QUERY_POSTGIS = 4,
+    VPS_CATALOG_QUERY_COUNT = 5
 } VpsCatalogQuery;
 
 typedef enum VpsRelationKind {
@@ -141,6 +142,7 @@ typedef struct VpsColumnMetadata {
     VpsMetadataString default_expression_hash;
     VpsMetadataString domain_default_hash;
     VpsMetadataString domain_constraint_hash;
+    VpsMetadataString formatted_type;
     char type_category;
     char type_kind;
     char domain_base_category;

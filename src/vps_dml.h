@@ -2,10 +2,11 @@
 #define VPS_DML_H
 
 #include "vps_row_identity.h"
+#include "vps_spatial.h"
 #include "vps_table_metadata.h"
 
 #define VPS_DML_MAX_COLUMNS 1024U
-#define VPS_DML_MAX_PARAMETERS (VPS_DML_MAX_COLUMNS + VPS_METADATA_MAX_KEY_COLUMNS + 1U)
+#define VPS_DML_MAX_PARAMETERS (2U * VPS_DML_MAX_COLUMNS + VPS_METADATA_MAX_KEY_COLUMNS + 1U)
 #define VPS_DML_QUERY_LIMIT (1024U * 1024U)
 
 typedef enum VpsDmlOperation {
@@ -49,13 +50,18 @@ typedef struct VpsDmlPolicy {
     size_t key_count;
     size_t version_visible;
     VpsDmlOptimisticMode optimistic_mode;
+    const VpsSpatialCapabilities *spatial;
+    VpsSpatialFormat spatial_format;
+    unsigned char spatial_kind[VPS_DML_MAX_COLUMNS];
+    uint32_t spatial_srid[VPS_DML_MAX_COLUMNS];
     int writable;
 } VpsDmlPolicy;
 
 typedef enum VpsDmlParameterSource {
     VPS_DML_PARAMETER_NEW_VALUE = 1,
     VPS_DML_PARAMETER_OLD_KEY = 2,
-    VPS_DML_PARAMETER_OLD_OPTIMISTIC = 3
+    VPS_DML_PARAMETER_OLD_OPTIMISTIC = 3,
+    VPS_DML_PARAMETER_SPATIAL_SRID = 4
 } VpsDmlParameterSource;
 
 typedef struct VpsDmlParameterSlot {
