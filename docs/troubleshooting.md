@@ -19,9 +19,10 @@ still are not logged. Do not attach environment dumps, database URLs,
 certificates/private keys, row data, or SQLite schemas containing `connstr` to
 a bug report.
 
-For a reproducible report, provide the architecture, SQLite version,
-PostgreSQL major version, extension API version, operation/phase, SQLite code,
-and SQLSTATE. Then run the appropriate gate from [Building](building.md).
+For a reproducible report, provide the architecture, SQLite build identifier,
+PostgreSQL major/build identifier, extension API identifier, operation/phase,
+SQLite code, and SQLSTATE. Then run the appropriate gate from
+[Building](building.md).
 
 ## See Also
 

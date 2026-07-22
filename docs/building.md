@@ -1,6 +1,6 @@
 [Back to README](../README.md) · [Next: Connection and credentials →](connection-credentials.md)
 
-# Building Windows 1.0
+# Building on Windows
 
 ## Requirements
 
@@ -25,8 +25,8 @@ pwsh -NoProfile -File scripts/build-stage1.ps1 -Preset msvc-x64-release
 The resulting loadable extension is placed in the corresponding
 `build/<preset>/` directory. The script configures CMake, builds all targets,
 and runs CTest. Network tests report `skipped` when no runtime fixture is
-configured; the mandatory release gate starts pinned local PostgreSQL 15–18
-instances itself.
+configured. The separate `run-pg-matrix.ps1` gate starts the provisioned local
+PostgreSQL 15–18 instances and tests both client architectures.
 
 ## Quality gates
 
@@ -45,21 +45,23 @@ reproducibility workflow recorded in the release manifest.
 
 ## Release package and dist
 
-The complete release workflow—two reproducible Win32/x64 builds, PE and package
-inspection, SBOM and provenance generation, and Windows 1.0 acceptance—runs
-with one command:
+The packaging workflow performs two reproducible Win32/x64 builds, PE and
+package inspection, SBOM and provenance generation, documentation/source-tree
+checks, and current acceptance-matrix validation:
 
 ```powershell
 pwsh -NoProfile -File scripts/package-windows.ps1
 ```
 
-The verified archive is published as
-`dist/VirtualPostgreSQL-1.0.0-windows.zip`. Git permits only versioned
-`VirtualPostgreSQL-*.zip` files in `dist/`; intermediate staging directories
-and every other `dist/` file remain ignored.
+The heavyweight static-analysis, sanitizer, fuzz, PostgreSQL matrix, hardening,
+and performance gates are separate prerequisites; packaging does not rerun
+them. The verified archive is published as
+`dist/VirtualPostgreSQL-*-windows.zip`. Git permits only matching release ZIP
+files in `dist/`; intermediate staging directories and every other `dist/`
+file remain ignored.
 
 ## See Also
 
 - [Static analysis](static-analysis.md) — three independent analyzer contours.
 - [Sanitizers](sanitizers.md) — supported clang-cl configurations.
-- [Platform support](platform-support.md) — exact Windows 1.0 matrix.
+- [Platform support](platform-support.md) — current Windows matrix.

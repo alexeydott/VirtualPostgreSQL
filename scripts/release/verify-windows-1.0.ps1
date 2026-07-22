@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $Root 'scripts\ci\vps-ci-common.ps1')
 $rootPath = Assert-VpsSafeRoot -Root $Root
 $gate = 'windows-1.0-acceptance'
-$matrixPath = Join-Path $rootPath 'docs\windows-1.0-acceptance.md'
+$matrixPath = Join-Path $rootPath 'docs\windows-current-acceptance.md'
 $package = Join-Path $rootPath $PackageRoot
 $reproManifestPath = Join-Path $rootPath 'build\stage15-reproducible\reproducibility-manifest.json'
 
@@ -43,14 +43,14 @@ $expectedExports = @(Get-Content -LiteralPath (Join-Path $rootPath 'scripts\ci\e
     ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
 $definitionExports = @(Get-Content -LiteralPath (Join-Path $rootPath 'src\virtualpostgresql.def') |
     Select-Object -Skip 2 | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
-if ($expectedExports.Count -ne 8 -or
+if ($expectedExports.Count -ne 11 -or
     @(Compare-Object $expectedExports $definitionExports).Count -ne 0) {
     throw '[acceptance] public export freeze mismatch'
 }
 
 foreach ($abi in @(
-    @{Arch='x86';Exe='build/stage1-msvc-x86-debug/vps_abi_layout_test.exe';Pattern='pointer_bits=32 config_size=112 lease_size=40 provider_size=48 status=passed'},
-    @{Arch='x64';Exe='build/stage1-msvc-x64-release/vps_abi_layout_test.exe';Pattern='pointer_bits=64 config_size=200 lease_size=64 provider_size=72 status=passed'})) {
+    @{Arch='x86';Exe='build/stage1-msvc-x86-debug/vps_abi_layout_test.exe';Pattern='pointer_bits=32 config_size=112 lease_size=40 provider_size=48 query_lease_size=56 query_provider_size=48 status=passed'},
+    @{Arch='x64';Exe='build/stage1-msvc-x64-release/vps_abi_layout_test.exe';Pattern='pointer_bits=64 config_size=200 lease_size=64 provider_size=72 query_lease_size=80 query_provider_size=72 status=passed'})) {
     $output = @(& (Join-Path $rootPath $abi.Exe) 2>&1) -join "`n"
     if ($LASTEXITCODE -ne 0 -or $output -notmatch [regex]::Escape($abi.Pattern)) {
         throw "[acceptance] ABI layout failed: $($abi.Arch)"
@@ -60,7 +60,7 @@ foreach ($abi in @(
 $requiredPackage = @(
     'bin\win32\virtualpostgresql.dll','bin\x64\virtualpostgresql.dll',
     'include\virtualpostgresql\vps_api.h','docs\README.md',
-    'docs\TECHNICAL_SPECIFICATION.md','docs\SECURITY.md','docs\TYPE_MAPPING.md',
+    'docs\SECURITY.md','docs\TYPE_MAPPING.md',
     'docs\QUERY_SOURCE.md','docs\TRANSACTIONS.md','docs\SPATIAL.md',
     'docs\BUILDING.md','examples\read-only.sql','licenses\OpenSSL-LICENSE.txt',
     'sbom\cyclonedx.json','provenance\slsa-provenance.json','manifest.json','SHA256SUMS'
@@ -91,4 +91,4 @@ New-Item -ItemType Directory -Path $evidence -Force | Out-Null
 $attestation | ConvertTo-Json -Depth 4 | Set-Content `
     -LiteralPath (Join-Path $evidence 'windows-1.0-attestation.json') -Encoding utf8
 Write-VpsCiEvent -Gate $gate -Level info -Status passed `
-    -Detail "api=1.0.0,abi_architectures=2,exports=8,criteria=132,passed=132,failed=0,matrix_sha256=$matrixHash,source_tree=$($reproManifest.source_tree)"
+    -Detail "api=1.0.0,abi_architectures=2,exports=11,criteria=132,passed=132,failed=0,matrix_sha256=$matrixHash,source_tree=$($reproManifest.source_tree)"

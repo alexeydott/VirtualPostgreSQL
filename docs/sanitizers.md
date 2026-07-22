@@ -2,7 +2,7 @@
 
 # Windows sanitizer contours
 
-The Windows 1.0 gate runs isolated x64 clang-cl 19.1.5 builds under AddressSanitizer and
+The current Windows gate runs isolated x64 clang-cl builds under AddressSanitizer and
 UndefinedBehaviorSanitizer. Both contours build production libraries, the loadable extension,
 unit tests, the SQLite host tests, integration fixtures, and libFuzzer targets. Network tests may
 skip only when their explicit runtime environment is absent.

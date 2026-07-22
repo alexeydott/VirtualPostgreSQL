@@ -9,10 +9,10 @@
 
 typedef struct FakeProvider {
     const char *query;
-    uint64_t version;
+    uint64_t revision;
     size_t resolves;
     size_t releases;
-    VpsQueryProfileResult result;
+    int32_t result;
 } FakeProvider;
 
 static int failures = 0;
@@ -20,27 +20,27 @@ static int failures = 0;
     (void)fprintf(stderr, "CHECK failed line %d: %s\n", __LINE__, #condition); \
     ++failures; } } while (0)
 
-static VpsQueryProfileResult fake_resolve(void *context,
-                                          const char *name,
-                                          size_t name_length,
-                                          VpsQueryProfileLease *lease)
+static int32_t fake_resolve(void *context,
+                            const char *name,
+                            uint32_t name_length,
+                            VpsQueryProfileLease *lease)
 {
     FakeProvider *fake = (FakeProvider *)context;
     (void)name;
     (void)name_length;
     ++fake->resolves;
-    if (fake->result != VPS_QUERY_PROFILE_OK) return fake->result;
+    if (fake->result != VPS_QUERY_PROFILE_PROVIDER_OK) return fake->result;
     lease->query = fake->query;
-    lease->query_length = strlen(fake->query);
-    lease->profile_version = fake->version;
-    lease->lease_context = fake;
-    return VPS_QUERY_PROFILE_OK;
+    lease->query_length = (uint32_t)strlen(fake->query);
+    lease->profile_revision = fake->revision;
+    lease->provider_lease = fake;
+    return VPS_QUERY_PROFILE_PROVIDER_OK;
 }
 
 static void fake_release(void *context, VpsQueryProfileLease *lease)
 {
     FakeProvider *fake = (FakeProvider *)context;
-    CHECK(lease->lease_context == fake);
+    CHECK(lease->provider_lease == fake);
     ++fake->releases;
     (void)memset(lease, 0, sizeof(*lease));
 }
@@ -53,7 +53,8 @@ static void test_fault_cleanup(void)
     VpsQueryProfileRegistry registry;
     VpsResolvedQueryProfile resolved;
     VpsQueryProfileProvider provider;
-    FakeProvider fake = {"SELECT 1", 3U, 0U, 0U, VPS_QUERY_PROFILE_OK};
+    FakeProvider fake = {"SELECT 1", 3U, 0U, 0U,
+                         VPS_QUERY_PROFILE_PROVIDER_OK};
 
     CHECK(vps_allocator_system(&backing) == VPS_MEMORY_OK);
     CHECK(vps_fault_allocator_init(&fault, &backing, 1U) == VPS_MEMORY_OK);
@@ -62,16 +63,17 @@ static void test_fault_cleanup(void)
               &registry, vps_platform_current_operations(), NULL) ==
           VPS_QUERY_PROFILE_OK);
     (void)memset(&provider, 0, sizeof(provider));
-    provider.structure_size = (uint32_t)sizeof(provider);
-    provider.contract_version = VPS_QUERY_PROFILE_CONTRACT_VERSION;
+    provider.header.structure_size = (uint32_t)sizeof(provider);
+    provider.header.api_version = VPS_API_VERSION;
+    provider.header.present_fields = VPS_QUERY_PROFILE_PROVIDER_FIELDS_CURRENT;
     provider.resolve = fake_resolve;
     provider.release = fake_release;
     provider.provider_context = &fake;
-    provider.contract_version = 0U;
+    provider.header.api_version = VPS_API_VERSION_ENCODE(2, 0, 0);
     CHECK(vps_query_profile_registry_register(
               &registry, VPS_QUERY_PROFILE_HOST, 91U, &provider) ==
           VPS_QUERY_PROFILE_ABI_INCOMPATIBLE);
-    provider.contract_version = VPS_QUERY_PROFILE_CONTRACT_VERSION;
+    provider.header.api_version = VPS_API_VERSION;
     CHECK(vps_query_profile_registry_register(
               &registry, VPS_QUERY_PROFILE_HOST, 1U, &provider) ==
           VPS_QUERY_PROFILE_OK);
@@ -101,8 +103,8 @@ typedef struct ResolveThread {
     VpsQueryProfileResult result;
 } ResolveThread;
 
-static VpsQueryProfileResult blocking_resolve(
-    void *context, const char *name, size_t name_length,
+static int32_t blocking_resolve(
+    void *context, const char *name, uint32_t name_length,
     VpsQueryProfileLease *lease)
 {
     static const char query[] = "SELECT 1 AS id";
@@ -114,19 +116,19 @@ static VpsQueryProfileResult blocking_resolve(
         (void)SetEvent(blocking->entered);
     }
     if (WaitForSingleObject(blocking->proceed, 5000U) != WAIT_OBJECT_0) {
-        return VPS_QUERY_PROFILE_BUSY;
+        return VPS_QUERY_PROFILE_PROVIDER_UNAVAILABLE;
     }
     lease->query = query;
     lease->query_length = sizeof(query) - 1U;
-    lease->profile_version = 9U;
-    lease->lease_context = blocking;
-    return VPS_QUERY_PROFILE_OK;
+    lease->profile_revision = 9U;
+    lease->provider_lease = blocking;
+    return VPS_QUERY_PROFILE_PROVIDER_OK;
 }
 
 static void blocking_release(void *context, VpsQueryProfileLease *lease)
 {
     BlockingProvider *blocking = (BlockingProvider *)context;
-    CHECK(lease->lease_context == blocking);
+    CHECK(lease->provider_lease == blocking);
     (void)InterlockedIncrement(&blocking->releases);
 }
 
@@ -164,8 +166,9 @@ static void test_concurrent_resolve(void)
               &registry, vps_platform_current_operations(), NULL) ==
           VPS_QUERY_PROFILE_OK);
     (void)memset(&provider, 0, sizeof(provider));
-    provider.structure_size = (uint32_t)sizeof(provider);
-    provider.contract_version = VPS_QUERY_PROFILE_CONTRACT_VERSION;
+    provider.header.structure_size = (uint32_t)sizeof(provider);
+    provider.header.api_version = VPS_API_VERSION;
+    provider.header.present_fields = VPS_QUERY_PROFILE_PROVIDER_FIELDS_CURRENT;
     provider.resolve = blocking_resolve;
     provider.release = blocking_release;
     provider.provider_context = &blocking;
@@ -202,15 +205,17 @@ int main(void)
     VpsQueryProfileRegistry registry;
     VpsResolvedQueryProfile resolved;
     VpsQueryProfileProvider provider;
-    FakeProvider fake = {"SELECT 1 AS id", 7U, 0U, 0U, VPS_QUERY_PROFILE_OK};
+    FakeProvider fake = {"SELECT 1 AS id", 7U, 0U, 0U,
+                         VPS_QUERY_PROFILE_PROVIDER_OK};
 
     CHECK(vps_allocator_system(&allocator) == VPS_MEMORY_OK);
     CHECK(vps_query_profile_registry_init(
               &registry, vps_platform_current_operations(), NULL) ==
           VPS_QUERY_PROFILE_OK);
     (void)memset(&provider, 0, sizeof(provider));
-    provider.structure_size = (uint32_t)sizeof(provider);
-    provider.contract_version = VPS_QUERY_PROFILE_CONTRACT_VERSION;
+    provider.header.structure_size = (uint32_t)sizeof(provider);
+    provider.header.api_version = VPS_API_VERSION;
+    provider.header.present_fields = VPS_QUERY_PROFILE_PROVIDER_FIELDS_CURRENT;
     provider.resolve = fake_resolve;
     provider.release = fake_release;
     provider.provider_context = &fake;
@@ -223,7 +228,7 @@ int main(void)
               &registry, VPS_QUERY_PROFILE_HOST, "active", 6U, &resolved) ==
           VPS_QUERY_PROFILE_OK);
     CHECK(fake.resolves == 1U && fake.releases == 1U);
-    CHECK(resolved.profile_version == 7U && resolved.provider_id == 91U);
+    CHECK(resolved.profile_revision == 7U && resolved.provider_id == 91U);
     CHECK(resolved.query.size == strlen(fake.query) + 1U);
     CHECK(resolved.analysis.result == VPS_QUERY_SOURCE_OK);
     CHECK(vps_query_profile_registry_register(
@@ -234,7 +239,7 @@ int main(void)
     CHECK(vps_resolved_query_profile_init(&resolved, &allocator) ==
           VPS_QUERY_PROFILE_OK);
     fake.query = "DELETE FROM guarded";
-    fake.version = 8U;
+    fake.revision = 8U;
     CHECK(vps_query_profile_registry_resolve(
               &registry, VPS_QUERY_PROFILE_HOST, "invalid", 7U, &resolved) ==
           VPS_QUERY_PROFILE_INVALID_QUERY);

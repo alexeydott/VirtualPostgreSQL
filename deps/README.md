@@ -1,6 +1,6 @@
 # Pinned prototype dependencies
 
-Stage 0 builds all network dependencies from pinned upstream source archives. Generated source trees, libraries and manifests live under ignored `build/`; this directory stores only reproducibility inputs.
+The prototype and release workflows build all network dependencies from pinned upstream source archives. Generated source trees, libraries and manifests live under ignored `build/`; this directory stores only reproducibility inputs.
 
 | Dependency | Pin | Source archive | SHA-256 | License |
 |---|---:|---|---|---|
@@ -33,4 +33,4 @@ The validation scripts print only tool names, versions, architectures, safe repo
 
 ## Update policy
 
-Changing any pin requires updating `versions.json`, this table, license inputs and the expected hashes in reproducibility evidence. A dependency update is not complete until Win32/x64 static builds and the Stage 0 prototype suite pass again.
+Changing any pin requires updating `versions.json`, this table, license inputs and the expected hashes in reproducibility evidence. A dependency update is not complete until Win32/x64 static builds and the prototype suite pass again.

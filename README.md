@@ -1,12 +1,16 @@
 # VirtualPostgreSQL
 
-VirtualPostgreSQL is a Windows-first, portable-C SQLite (v. 3.44.0 or later) Virtual Table extension for PostgreSQL access without external client DLLs.
-Currently, builds are available for both Win32 and x64 builds with either a statically linked dependencies.
+> A portable-C SQLite Virtual Table extension for PostgreSQL, currently
+> supported on Windows without external client DLLs.
+
+VirtualPostgreSQL currently provides Win32 and x64 builds with statically
+linked client, TLS, compression, and private SQLite dependencies.
 
 ## Features
 
 * PostgreSQL 15–18; SQLite host 3.44.0 or later, module v4, and `xIntegrity`.
 * Table and query metadata, exact scalar, `bytea`, and date codecs, and stable identity.
+* Database-scoped query-profile providers for centrally managed definitions.
 * Predicate, projection, `IN`, ordering, and limit pushdown with local rechecks.
 * Bounded connection pool, independent cursors, cancellation, and unknown-COMMIT safety.
 * Query materialization using `memory` or `temp`; PostGIS WKT, WKB, EWKT, and EWKB.
@@ -52,9 +56,12 @@ PostgreSQL ACLs and Row-Level Security remain in effect.
 | Queries             | [Query sources](docs/query-sources.md), [Read-only VTable](docs/read-only-vtable.md), [Planner](docs/planner-pushdown.md)                                                                                |
 | Data modification   | [DML/identity](docs/dml-identity.md), [Transactions](docs/transactions-savepoints.md)                                                                                                                    |
 | Spatial data        | [PostGIS](docs/spatial.md)                                                                                                                                                                               |
-| Quality and release | [Static analysis](docs/static-analysis.md), [Sanitizers](docs/sanitizers.md), [Release notes](docs/release-notes-1.0.0.md), [Acceptance](docs/windows-1.0-acceptance.md), [Examples](examples/README.md) |
+| Quality and release | [Static analysis](docs/static-analysis.md), [Sanitizers](docs/sanitizers.md), [Release notes](docs/release-notes-current.md), [Acceptance](docs/windows-current-acceptance.md), [Examples](examples/README.md) |
 
-Linux and Android supports teoricaly but not are long-term development tracks. Stock Android SQLite builds generally do not permit loadable extensions; a future Android host must support either dynamic loading or static entry-point registration.
+Currently, Windows is the only supported runtime. Linux and Android remain
+long-term development tracks. Stock Android SQLite builds generally do not
+permit loadable extensions; a future Android host must support either dynamic
+loading or static entry-point registration.
 
 ## License
 

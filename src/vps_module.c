@@ -14,6 +14,7 @@ SQLITE_EXTENSION_INIT3
 #include "vps_planner.h"
 #include "vps_query_validation.h"
 #include "vps_query_metadata.h"
+#include "vps_query_profile.h"
 #if defined(VPS_ENABLE_QUERY_MATERIALIZATION)
 #include "vps_query_cache.h"
 #include "vps_query_indexes.h"
@@ -69,6 +70,10 @@ typedef struct VpsTable {
     size_t expected_fields_size;
     VpsBuffer scan_query;
     uint64_t source_fingerprint;
+    uint64_t query_profile_name_fingerprint;
+    uint64_t query_profile_revision;
+    uint64_t query_profile_provider_id;
+    VpsQueryProfileSource query_profile_source;
     VpsModuleContext *module_context;
     uint16_t key_columns[VPS_QUERY_METADATA_MAX_KEY_COLUMNS];
     size_t key_column_count;
@@ -221,6 +226,16 @@ VpsModuleContext *vps_module_context_create(sqlite3 *database)
         return NULL;
     }
     context->initialized_cancel_registry = 1;
+    if (vps_query_profile_registry_init(
+            &context->query_profile_registry,
+            vps_platform_current_operations(), NULL) !=
+        VPS_QUERY_PROFILE_OK) {
+        (void)vps_cancel_registry_cleanup(&context->cancel_registry);
+        vps_transaction_cleanup(&context->transaction);
+        sqlite3_free(context);
+        return NULL;
+    }
+    context->initialized_query_profile_registry = 1;
 #if defined(_WIN32)
     {
         VpsCredentialProvider provider;
@@ -230,6 +245,8 @@ VpsModuleContext *vps_module_context_create(sqlite3 *database)
                 &context->credential_registry,
                 vps_platform_current_operations(), NULL) !=
                 VPS_CREDENTIAL_REGISTRY_OK) {
+            (void)vps_query_profile_registry_cleanup(
+                &context->query_profile_registry);
             (void)vps_cancel_registry_cleanup(&context->cancel_registry);
             vps_transaction_cleanup(&context->transaction);
             sqlite3_free(context);
@@ -242,6 +259,8 @@ VpsModuleContext *vps_module_context_create(sqlite3 *database)
                 VPS_CREDENTIAL_REGISTRY_OK) {
             (void)vps_credential_registry_cleanup(
                 &context->credential_registry);
+            (void)vps_query_profile_registry_cleanup(
+                &context->query_profile_registry);
             (void)vps_cancel_registry_cleanup(&context->cancel_registry);
             vps_transaction_cleanup(&context->transaction);
             sqlite3_free(context);
@@ -256,6 +275,8 @@ VpsModuleContext *vps_module_context_create(sqlite3 *database)
             (void)vps_wincred_provider_cleanup(&context->wincred);
             (void)vps_credential_registry_cleanup(
                 &context->credential_registry);
+            (void)vps_query_profile_registry_cleanup(
+                &context->query_profile_registry);
             (void)vps_cancel_registry_cleanup(&context->cancel_registry);
             vps_transaction_cleanup(&context->transaction);
             sqlite3_free(context);
@@ -284,6 +305,9 @@ void vps_module_context_destroy(void *opaque)
     if (context->initialized_wincred)
         (void)vps_wincred_provider_cleanup(&context->wincred);
 #endif
+    if (context->initialized_query_profile_registry)
+        (void)vps_query_profile_registry_cleanup(
+            &context->query_profile_registry);
     if (context->initialized_cancel_registry)
         (void)vps_cancel_registry_cleanup(&context->cancel_registry);
     sqlite3_free(context);
@@ -533,24 +557,73 @@ static int vps_build_table_query(VpsTable *table)
 
 static int vps_build_query_source(VpsTable *table)
 {
-    const char *query;
+    const char *query = NULL;
+    const char *profile_name;
     size_t query_length = 0U;
+    size_t profile_name_length = 0U;
     VpsQuerySourceAnalysis analysis;
+    VpsResolvedQueryProfile resolved;
+    VpsQueryProfileResult profile_result = VPS_QUERY_PROFILE_NOT_REGISTERED;
+    int resolved_initialized = 0;
+    int result = 0;
+    size_t source_index;
+
+    (void)memset(&resolved, 0, sizeof(resolved));
     query = vps_argument_text(&table->arguments, VPS_ARGUMENT_ID_QUERY,
                               &query_length);
-    if (query == NULL ||
-        vps_query_source_scan(query, query_length, &table->logger, &analysis) !=
-            VPS_QUERY_SOURCE_OK ||
-        vps_buffer_init(&table->scan_query, &table->allocator,
-                        VPS_VTAB_QUERY_LIMIT) != VPS_MEMORY_OK ||
-        !vps_append_bytes(&table->scan_query, "SELECT * FROM (", 15U) ||
+    if (query != NULL) {
+        if (vps_query_source_scan(query, query_length, &table->logger,
+                                  &analysis) != VPS_QUERY_SOURCE_OK)
+            return 0;
+    } else {
+        profile_name = vps_argument_text(
+            &table->arguments, VPS_ARGUMENT_ID_QUERY_PROFILE,
+            &profile_name_length);
+        if (profile_name == NULL || table->module_context == NULL ||
+            !table->module_context->initialized_query_profile_registry ||
+            vps_resolved_query_profile_init(&resolved, &table->allocator) !=
+                VPS_QUERY_PROFILE_OK)
+            return 0;
+        resolved_initialized = 1;
+        for (source_index = 0U;
+             source_index < VPS_QUERY_PROFILE_PROVIDER_COUNT;
+             ++source_index) {
+            profile_result = vps_query_profile_registry_resolve(
+                &table->module_context->query_profile_registry,
+                (VpsQueryProfileSource)source_index, profile_name,
+                profile_name_length, &resolved);
+            if (profile_result == VPS_QUERY_PROFILE_OK) break;
+            if (profile_result != VPS_QUERY_PROFILE_NOT_REGISTERED &&
+                profile_result != VPS_QUERY_PROFILE_NOT_FOUND)
+                goto cleanup;
+        }
+        if (profile_result != VPS_QUERY_PROFILE_OK) goto cleanup;
+        query = (const char *)resolved.query.data;
+        analysis = resolved.analysis;
+        table->query_profile_name_fingerprint = resolved.name_fingerprint;
+        table->query_profile_revision = resolved.profile_revision;
+        table->query_profile_provider_id = resolved.provider_id;
+        table->query_profile_source = resolved.source;
+    }
+    if (vps_buffer_init(&table->scan_query, &table->allocator,
+                        VPS_VTAB_QUERY_LIMIT) != VPS_MEMORY_OK)
+        goto cleanup;
+    table->initialized_query = 1;
+    if (!vps_append_bytes(&table->scan_query, "SELECT * FROM (", 15U) ||
         !vps_append_bytes(&table->scan_query, query,
                           analysis.statement_length) ||
         !vps_append_bytes(&table->scan_query, ") AS vps_scan\0", 14U))
-        return 0;
+        goto cleanup;
     table->scan_query.size -= 1U;
-    table->initialized_query = 1;
-    return 1;
+    result = 1;
+
+cleanup:
+    if (!result && table->initialized_query) {
+        vps_buffer_reset(&table->scan_query);
+        table->initialized_query = 0;
+    }
+    if (resolved_initialized) vps_resolved_query_profile_cleanup(&resolved);
+    return result;
 }
 
 #if defined(VPS_ENABLE_QUERY_MATERIALIZATION)
@@ -1435,6 +1508,16 @@ static uint64_t vps_vtab_source_fingerprint(const VpsTable *table)
     const unsigned char *query = table->scan_query.data;
     for (index = 0U; index < table->scan_query.size; ++index) {
         hash ^= query[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    if (table->query_profile_revision != 0U) {
+        hash ^= table->query_profile_name_fingerprint;
+        hash *= UINT64_C(1099511628211);
+        hash ^= table->query_profile_revision;
+        hash *= UINT64_C(1099511628211);
+        hash ^= table->query_profile_provider_id;
+        hash *= UINT64_C(1099511628211);
+        hash ^= (uint64_t)table->query_profile_source;
         hash *= UINT64_C(1099511628211);
     }
     for (index = 0U; index < table->described.field_count; ++index) {

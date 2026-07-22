@@ -5,6 +5,7 @@
 #include "vps_cancel.h"
 #include "vps_client.h"
 #include "vps_connection_pool.h"
+#include "vps_query_profile.h"
 #include "vps_transaction.h"
 #if defined(_WIN32)
 #include "vps_credential_provider.h"
@@ -16,6 +17,7 @@
 typedef struct VpsModuleContext {
     sqlite3 *database;
     VpsCancelRegistry cancel_registry;
+    VpsQueryProfileRegistry query_profile_registry;
     VpsAllocator transaction_allocator;
     VpsTransactionCoordinator transaction;
     VpsConnectionLease transaction_lease;
@@ -28,6 +30,7 @@ typedef struct VpsModuleContext {
     uint64_t next_table_id;
     uint64_t table_references;
     int initialized_cancel_registry;
+    int initialized_query_profile_registry;
     int initialized_transaction;
 #if defined(_WIN32)
     int initialized_credential_registry;

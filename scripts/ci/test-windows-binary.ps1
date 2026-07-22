@@ -54,22 +54,25 @@ if ($exportDifference.Count -gt 0) {
     exit 1
 }
 
-$credentialProviderAbiExports = @(
+$providerAbiExports = @(
     'virtualpostgresql_credential_config_structure_size',
     'virtualpostgresql_credential_lease_structure_size',
     'virtualpostgresql_credential_provider_structure_size',
     'virtualpostgresql_register_credential_provider',
-    'virtualpostgresql_wincred_provider'
+    'virtualpostgresql_wincred_provider',
+    'virtualpostgresql_query_profile_lease_structure_size',
+    'virtualpostgresql_query_profile_provider_structure_size',
+    'virtualpostgresql_register_query_profile_provider'
 )
-$missingCredentialProviderAbiExports = @(
-    $credentialProviderAbiExports | Where-Object { $_ -notin $actualExports }
+$missingProviderAbiExports = @(
+    $providerAbiExports | Where-Object { $_ -notin $actualExports }
 )
 $exportedWinCredInternals = @(
     $actualExports | Where-Object { $_ -like 'vps_wincred_*' }
 )
-if ($missingCredentialProviderAbiExports.Count -gt 0 -or
+if ($missingProviderAbiExports.Count -gt 0 -or
     $exportedWinCredInternals.Count -gt 0) {
-    Write-VpsCiEvent -Gate $gate -Level error -Status failed -FailureClass 'credential_provider_export_boundary' -Detail "missing_abi=$($missingCredentialProviderAbiExports.Count),exported_wincred_internals=$($exportedWinCredInternals.Count)"
+    Write-VpsCiEvent -Gate $gate -Level error -Status failed -FailureClass 'provider_export_boundary' -Detail "missing_abi=$($missingProviderAbiExports.Count),exported_wincred_internals=$($exportedWinCredInternals.Count)"
     exit 1
 }
 
@@ -94,4 +97,4 @@ if (-not $version.FileDescription -or -not $version.FileVersion -or
     exit 1
 }
 
-Write-VpsCiEvent -Gate $gate -Level info -Status passed -Detail "arch=$Architecture,exports=$($actualExports.Count),credential_provider_abi=exported,wincred_provider=exported,wincred_internals=hidden"
+Write-VpsCiEvent -Gate $gate -Level info -Status passed -Detail "arch=$Architecture,exports=$($actualExports.Count),provider_abi=exported,wincred_provider=exported,wincred_internals=hidden"

@@ -25,9 +25,14 @@ embedded NUL bytes are rejected. Connection strings, environment values,
 provider references, service-file contents, and effective libpq settings are
 not emitted to logs or diagnostics.
 
+Safe, credential-free configuration shapes for all four modes are collected in
+[examples/connection-modes.sql](../examples/connection-modes.sql). The
+`connstr` example is intentionally temporary, password-free, and configured
+for certificate and hostname verification.
+
 ## Canonical connection identity
 
-Resolved connection settings are converted into a versioned, bounded canonical
+Resolved connection settings are converted into a format-tagged, bounded canonical
 identity. It includes normalized hosts and ports, database/user/service,
 service and TLS paths, TLS/channel/target policies, controlled search path,
 read/write class, and relevant timeouts. Exact pool and transaction matching

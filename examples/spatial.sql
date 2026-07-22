@@ -6,4 +6,5 @@ CREATE VIRTUAL TABLE temp.remote_places USING VirtualPostgreSQL(
 
 SELECT place_id, geometry FROM remote_places WHERE place_id=1;
 
--- SpatiaLite output, coordinate swap и automatic SRID transform отсутствуют.
+-- SpatiaLite output, coordinate swapping, and automatic SRID transforms are
+-- intentionally unsupported.

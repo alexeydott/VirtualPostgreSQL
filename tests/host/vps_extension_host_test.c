@@ -14,6 +14,48 @@ typedef int32_t (*VpsHostCancelFn)(sqlite3 *database);
 typedef int (*VpsHostRegisterCredentialProviderFn)(
     sqlite3 *database, const VpsCredentialProvider *provider);
 typedef int (*VpsHostWinCredProviderFn)(VpsCredentialProvider *provider);
+typedef int (*VpsHostRegisterQueryProfileProviderFn)(
+    sqlite3 *database,
+    uint32_t source,
+    uint64_t provider_id,
+    const VpsQueryProfileProvider *provider);
+
+typedef struct VpsHostQueryProfileState {
+    size_t resolves;
+    size_t releases;
+} VpsHostQueryProfileState;
+
+static int32_t vps_host_query_profile_resolve(
+    void *context,
+    const char *profile_name,
+    uint32_t profile_name_length,
+    VpsQueryProfileLease *lease)
+{
+    static const char expected_name[] = "host_smoke";
+    static const char query[] =
+        "SELECT 11::pg_catalog.int8 AS id, "
+        "'profile-ok'::pg_catalog.text AS label";
+    VpsHostQueryProfileState *state = (VpsHostQueryProfileState *)context;
+    if (state == NULL || profile_name == NULL || lease == NULL)
+        return VPS_QUERY_PROFILE_PROVIDER_ERROR;
+    state->resolves += 1U;
+    if (profile_name_length != sizeof(expected_name) - 1U ||
+        memcmp(profile_name, expected_name, sizeof(expected_name) - 1U) != 0)
+        return VPS_QUERY_PROFILE_PROVIDER_NOT_FOUND;
+    lease->query = query;
+    lease->query_length = (uint32_t)(sizeof(query) - 1U);
+    lease->profile_revision = UINT64_C(3);
+    lease->provider_lease = state;
+    return VPS_QUERY_PROFILE_PROVIDER_OK;
+}
+
+static void vps_host_query_profile_release(
+    void *context, VpsQueryProfileLease *lease)
+{
+    VpsHostQueryProfileState *state = (VpsHostQueryProfileState *)context;
+    if (state != NULL && lease != NULL && lease->provider_lease == state)
+        state->releases += 1U;
+}
 
 #if defined(VPS_DEBUG)
 static void vps_sqlite_log(void *context, int code, const char *message)
@@ -364,6 +406,17 @@ static int vps_runtime_contour(sqlite3 *database,
         "SELECT CAST(id AS TEXT) || ':' || CAST(n IS NULL AS TEXT) || ':' || "
         "hex(b) || ':' || u FROM vps_query",
         "7:1:0041:550e8400-e29b-41d4-a716-446655440000");
+    sql = sqlite3_mprintf(
+        "CREATE VIRTUAL TABLE temp.vps_query_profile USING "
+        "VirtualPostgreSQL(connstr=%Q,source=query,query_profile=host_smoke,"
+        "mode=ro,key_columns=id)", connstr);
+    if (sql == NULL) return 0;
+    passed &= vps_exec_expect(database, sql);
+    sqlite3_free(sql);
+    passed &= vps_query_text(
+        database,
+        "SELECT CAST(id AS TEXT) || ':' || label FROM vps_query_profile",
+        "11:profile-ok");
     sql = sqlite3_mprintf(
         "CREATE VIRTUAL TABLE temp.vps_planner USING VirtualPostgreSQL("
         "connstr=%Q,source=query,query=%Q,mode=ro,key_columns=id)",
@@ -967,13 +1020,18 @@ int main(int argument_count, char **arguments)
     char *runtime_connstr = vps_runtime_connstr();
     VpsHostCancelFn cancel = NULL;
     VpsHostRegisterCredentialProviderFn register_credential_provider = NULL;
+    VpsHostRegisterQueryProfileProviderFn register_query_profile_provider =
+        NULL;
     VpsHostWinCredProviderFn wincred_provider = NULL;
-    VpsCredentialProvider provider;
+    VpsCredentialProvider credential_provider;
+    VpsQueryProfileProvider query_profile_provider;
+    VpsHostQueryProfileState query_profile_state = {0};
 #if defined(_WIN32)
     HMODULE extension_module = NULL;
 #endif
 
-    (void)memset(&provider, 0, sizeof(provider));
+    (void)memset(&credential_provider, 0, sizeof(credential_provider));
+    (void)memset(&query_profile_provider, 0, sizeof(query_profile_provider));
 
     if (argument_count != 2) {
         (void)fprintf(stderr,
@@ -1010,19 +1068,37 @@ int main(int argument_count, char **arguments)
                 (VpsHostRegisterCredentialProviderFn)(void *)GetProcAddress(
                     extension_module,
                     "virtualpostgresql_register_credential_provider");
+            register_query_profile_provider =
+                (VpsHostRegisterQueryProfileProviderFn)(void *)GetProcAddress(
+                    extension_module,
+                    "virtualpostgresql_register_query_profile_provider");
             wincred_provider =
                 (VpsHostWinCredProviderFn)(void *)GetProcAddress(
                     extension_module, "virtualpostgresql_wincred_provider");
         }
         passed &= extension_module != NULL && cancel != NULL &&
                   register_credential_provider != NULL &&
+                  register_query_profile_provider != NULL &&
                   wincred_provider != NULL;
         if (passed) {
-            passed &= wincred_provider(&provider) == SQLITE_OK &&
-                      provider.header.api_version == VPS_API_VERSION &&
-                      provider.resolve != NULL && provider.release != NULL;
-            passed &= register_credential_provider(database, &provider) ==
-                      SQLITE_OK;
+            passed &= wincred_provider(&credential_provider) == SQLITE_OK &&
+                      credential_provider.header.api_version ==
+                          VPS_API_VERSION &&
+                      credential_provider.resolve != NULL &&
+                      credential_provider.release != NULL;
+            passed &= register_credential_provider(
+                          database, &credential_provider) == SQLITE_OK;
+            query_profile_provider.header.structure_size =
+                (uint32_t)sizeof(query_profile_provider);
+            query_profile_provider.header.api_version = VPS_API_VERSION;
+            query_profile_provider.header.present_fields =
+                VPS_QUERY_PROFILE_PROVIDER_FIELDS_CURRENT;
+            query_profile_provider.resolve = vps_host_query_profile_resolve;
+            query_profile_provider.release = vps_host_query_profile_release;
+            query_profile_provider.provider_context = &query_profile_state;
+            passed &= register_query_profile_provider(
+                          database, VPS_QUERY_PROFILE_SOURCE_HOST,
+                          UINT64_C(91), &query_profile_provider) == SQLITE_OK;
         }
     }
 #endif
@@ -1055,6 +1131,10 @@ int main(int argument_count, char **arguments)
         passed &= vps_query_text(
             database,
             "SELECT CAST(instr(virtualpostgresql_capabilities(), "
+            "'query-profile-provider') > 0 AS TEXT)", "1");
+        passed &= vps_query_text(
+            database,
+            "SELECT CAST(instr(virtualpostgresql_capabilities(), "
             "'metadata-functions') > 0 AND "
             "instr(virtualpostgresql_capabilities(), 'metadata-cache') > 0 "
             "AS TEXT)", "1");
@@ -1073,6 +1153,17 @@ int main(int argument_count, char **arguments)
             database,
             "SELECT count(*) FROM virtualpostgresql_table_info",
             SQLITE_CONSTRAINT);
+        passed &= vps_exec_expect_failure(
+            database,
+            "CREATE VIRTUAL TABLE temp.vps_missing_profile USING "
+            "VirtualPostgreSQL(connstr='host=127.0.0.1 sslmode=disable',"
+            "source=query,query_profile=missing,mode=ro)", SQLITE_ERROR);
+#if defined(_WIN32)
+        if (register_query_profile_provider != NULL)
+            passed &= register_query_profile_provider(
+                          database, VPS_QUERY_PROFILE_SOURCE_HOST,
+                          UINT64_C(92), &query_profile_provider) == SQLITE_BUSY;
+#endif
         result = sqlite3_exec(
             database,
             "CREATE VIRTUAL TABLE temp.vps_missing USING VirtualPostgreSQL",
@@ -1083,6 +1174,10 @@ int main(int argument_count, char **arguments)
         passed &= vps_query_text(database, "PRAGMA integrity_check", "ok");
         if (runtime_connstr != NULL && runtime_connstr[0] != '\0') {
             passed &= vps_runtime_contour(database, runtime_connstr, cancel);
+            passed &= query_profile_state.resolves >= 2U &&
+                      query_profile_state.releases >= 1U &&
+                      query_profile_state.releases <
+                          query_profile_state.resolves;
             if (vps_environment_enabled("VPS_VTAB_TEST_DML"))
                 passed &= vps_dml_contour(database, runtime_connstr);
             if (vps_environment_enabled("VPS_VTAB_TEST_TRANSACTIONS"))

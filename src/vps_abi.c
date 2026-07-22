@@ -30,6 +30,16 @@ uint32_t VPS_CALL virtualpostgresql_credential_provider_structure_size(void)
     return (uint32_t)sizeof(VpsCredentialProvider);
 }
 
+uint32_t VPS_CALL virtualpostgresql_query_profile_lease_structure_size(void)
+{
+    return (uint32_t)sizeof(VpsQueryProfileLease);
+}
+
+uint32_t VPS_CALL virtualpostgresql_query_profile_provider_structure_size(void)
+{
+    return (uint32_t)sizeof(VpsQueryProfileProvider);
+}
+
 VpsAbiValidationResult vps_abi_validate_header(
     const VpsAbiHeader *header,
     uint32_t minimum_structure_size,

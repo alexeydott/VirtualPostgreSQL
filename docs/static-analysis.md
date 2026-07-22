@@ -2,7 +2,7 @@
 
 # Static analysis
 
-Stage 15 treats compiler warnings as errors and runs three independent Windows contours:
+Currently, compiler warnings are errors and three independent Windows contours run:
 
 - MSVC `/analyze` for Win32 and x64;
 - selected `clang-tidy` correctness checks with all selected diagnostics promoted to errors;

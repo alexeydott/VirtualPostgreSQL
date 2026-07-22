@@ -1,8 +1,8 @@
-[← Previous: Troubleshooting](troubleshooting.md) · [Back to README](../README.md) · [Next: Release notes →](release-notes-1.0.0.md)
+[← Previous: Troubleshooting](troubleshooting.md) · [Back to README](../README.md) · [Next: Release notes →](release-notes-current.md)
 
 # Supported platforms
 
-## Windows 1.0
+## Currently supported Windows runtime
 
 | Contour | Status |
 |---|---|
@@ -24,9 +24,9 @@ Implementation-only `vps_wincred_*` symbols remain hidden.
 
 ## Long-term contours
 
-Linux and Android work starts only after Windows 1.0 is closed and is not part
-of this release claim. The presence of portable adapters does not imply runtime
-support.
+Currently, Linux and Android remain long-term development tracks and are not
+part of the supported runtime. The presence of portable adapters does not imply
+build, runtime, or packaging support.
 
 Stock Android SQLite is normally built without loadable-extension support. A
 future Android package requires an application-controlled SQLite host with

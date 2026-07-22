@@ -10,8 +10,11 @@ $required = @(
     'docs/query-sources.md','docs/transactions-savepoints.md','docs/spatial.md',
     'docs/metadata-functions-cache.md','docs/provider-abi.md',
     'docs/troubleshooting.md','docs/platform-support.md',
-    'examples/read-only.sql','examples/dml-transactions.sql',
-    'examples/spatial.sql','examples/credential-provider.c'
+    'docs/release-notes-current.md','docs/windows-current-acceptance.md',
+    'examples/read-only.sql','examples/connection-modes.sql',
+    'examples/dml-transactions.sql','examples/spatial.sql',
+    'examples/credential-provider.c','examples/windows-credential-provider.c',
+    'examples/query-profile-provider.c'
 )
 $navigationOrder = @(
     'building.md','connection-credentials.md','provider-abi.md','security.md',
@@ -19,8 +22,8 @@ $navigationOrder = @(
     'read-only-vtable.md','planner-pushdown.md','streaming-cancellation.md',
     'dml-identity.md','transactions-savepoints.md','spatial.md',
     'metadata-functions-cache.md','static-analysis.md','sanitizers.md',
-    'troubleshooting.md','platform-support.md','release-notes-1.0.0.md',
-    'windows-1.0-acceptance.md'
+    'troubleshooting.md','platform-support.md','release-notes-current.md',
+    'windows-current-acceptance.md'
 )
 $files = [Collections.Generic.List[IO.FileInfo]]::new()
 foreach ($relative in $required) {
@@ -30,8 +33,8 @@ foreach ($relative in $required) {
     }
 }
 $readme = Get-Content -LiteralPath (Join-Path $rootPath 'README.md')
-if ($readme.Count -ge 150 -or ($readme -join "`n") -notmatch '## Quick start' -or
-    ($readme -join "`n") -notmatch '## Документация' -or
+if ($readme.Count -ge 150 -or ($readme -join "`n") -notmatch '## Quick Start' -or
+    ($readme -join "`n") -notmatch '## Documentation' -or
     ($readme -join "`n") -notmatch '## License') {
     throw '[docs] README landing-page contract failed'
 }
@@ -80,12 +83,30 @@ foreach ($file in $docsFiles) {
         throw "[docs] non-English Cyrillic text found: $($file.Name)"
     }
 }
+$trackedMarkdown = @(& git -C $rootPath ls-files --cached --others `
+    --exclude-standard '*.md' | Where-Object {
+        Test-Path -LiteralPath (Join-Path $rootPath $_) -PathType Leaf
+    })
+if ($LASTEXITCODE -ne 0 -or $trackedMarkdown.Count -eq 0) {
+    throw '[docs] unable to enumerate project Markdown files'
+}
+$productReleasePattern =
+    '(?i)\bVirtualPostgreSQL\s+(?:version\s+)?v?[0-9]+(?:\.[0-9]+)*\b|\bWindows\s+1\.0\b|\b(?:API|ABI)\s+(?:version\s*:\s*)?[0-9]+(?:\.[0-9]+)*\b|\b(?:release-notes|windows)-[0-9]+(?:\.[0-9]+)*(?:-acceptance)?\.md\b'
+foreach ($relative in $trackedMarkdown) {
+    $content = Get-Content -LiteralPath (Join-Path $rootPath $relative) -Raw
+    if ($content -match '[А-Яа-яЁё]') {
+        throw "[docs] non-English Cyrillic text found: $relative"
+    }
+    if ($content -match $productReleasePattern) {
+        throw "[docs] numbered product-release wording found: $relative"
+    }
+}
 $publicHeaderPath = Join-Path $rootPath 'include\virtualpostgresql\vps_api.h'
 $publicHeader = Get-Content -LiteralPath $publicHeaderPath
 $publicDeclarationCount = 0
 for ($index = 0; $index -lt $publicHeader.Count; ++$index) {
     $line = $publicHeader[$index]
-    $isPublicType = $line -match '^typedef (?:uint64_t VpsCredentialFields;|struct Vps(?:AbiHeader|CredentialConfig|CredentialLease|CredentialProvider)\s*\{|(?:int32_t|void)\(VPS_CALL \*VpsCredential(?:Resolve|Release)Fn\)\()'
+    $isPublicType = $line -match '^typedef (?:uint64_t VpsCredentialFields;|struct Vps(?:AbiHeader|CredentialConfig|CredentialLease|CredentialProvider|QueryProfileLease|QueryProfileProvider)\s*\{|(?:int32_t|void)\(VPS_CALL \*Vps(?:Credential|QueryProfile)(?:Resolve|Release)Fn\)\()'
     $isPublicFunction = $line -match '^VPS_API\s+'
     if (-not $isPublicType -and -not $isPublicFunction) { continue }
     ++$publicDeclarationCount
@@ -97,7 +118,7 @@ for ($index = 0; $index -lt $publicHeader.Count; ++$index) {
         throw "[docs] public API declaration lacks an adjacent comment: line=$($index + 1)"
     }
 }
-if ($publicDeclarationCount -ne 14) {
+if ($publicDeclarationCount -ne 21) {
     throw "[docs] public API declaration inventory changed: count=$publicDeclarationCount"
 }
 $allText = @($files | ForEach-Object {
@@ -111,4 +132,4 @@ if ($allText -notmatch 'stock\s+Android\s+SQLite' -or
     throw '[docs] Android host SQLite caveat missing'
 }
 Write-VpsCiEvent -Gate 'docs' -Level info -Status passed `
-    -Detail "files=$($files.Count),links=$linkCount,broken=0,navigation_pages=$($navigationOrder.Count),english_docs=$($docsFiles.Count),public_api_comments=$publicDeclarationCount,readme_lines=$($readme.Count),required_examples=4,android_caveat=present"
+    -Detail "files=$($files.Count),links=$linkCount,broken=0,navigation_pages=$($navigationOrder.Count),english_markdown=$($trackedMarkdown.Count),numbered_product_releases=0,public_api_comments=$publicDeclarationCount,readme_lines=$($readme.Count),required_examples=7,android_caveat=present"

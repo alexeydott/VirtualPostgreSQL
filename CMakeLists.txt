@@ -741,6 +741,7 @@ set_target_properties(vps_query_profile PROPERTIES
   POSITION_INDEPENDENT_CODE ON
 )
 target_include_directories(vps_query_profile PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
 )
 target_link_libraries(vps_query_profile PUBLIC
@@ -1141,6 +1142,7 @@ if(VPS_BUILD_EXTENSION AND EXISTS "${VPS_SQLITE_AMALGAMATION_DIR}/sqlite3ext.h")
     vps_transaction
     vps_planner
     vps_query_metadata
+    vps_query_profile
     vps_query_validation
     vps_row_identity
     vps_spatial
@@ -1717,6 +1719,7 @@ if(BUILD_TESTING)
       vps_metadata_cache
       vps_planner
       vps_query_metadata
+      vps_query_profile
       vps_query_validation
       vps_row_identity
       vps_spatial
@@ -1759,5 +1762,25 @@ if(BUILD_TESTING)
     vps_apply_strict_warnings(vps_extension_host_test)
     add_test(NAME vps_extension_host
       COMMAND vps_extension_host_test $<TARGET_FILE:virtualpostgresql>)
+
+    if(WIN32)
+      add_executable(vps_query_profile_host_test
+        tests/host/vps_query_profile_host_test.c
+      )
+      target_compile_features(vps_query_profile_host_test PRIVATE c_std_11)
+      set_target_properties(vps_query_profile_host_test PROPERTIES
+        C_EXTENSIONS OFF)
+      target_include_directories(vps_query_profile_host_test PRIVATE
+        "${VPS_SQLITE_AMALGAMATION_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      )
+      target_link_libraries(vps_query_profile_host_test PRIVATE
+        vps_sqlite_host)
+      vps_apply_strict_warnings(vps_query_profile_host_test)
+      add_test(NAME vps_query_profile_host
+        COMMAND vps_query_profile_host_test $<TARGET_FILE:virtualpostgresql>)
+      set_tests_properties(vps_query_profile_host PROPERTIES
+        SKIP_RETURN_CODE 77)
+    endif()
   endif()
 endif()

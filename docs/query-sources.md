@@ -5,8 +5,16 @@
 A query source maps the result of one `SELECT` or `WITH ... SELECT` statement
 as a read-only virtual table. An inline query passes a bounded lexical scanner,
 then PostgreSQL prepare/describe through an outer wrapper. Production
-deployments should prefer a versioned `query_profile` resolved by a host,
-protected-configuration, environment, or named-registry provider.
+deployments should normally prefer centrally managed query definitions.
+
+Currently, the Virtual Table runtime accepts either an inline `query` or a
+`query_profile`. A host registers database-scoped providers with
+`virtualpostgresql_register_query_profile_provider()`. Resolution checks the
+host, protected-configuration, environment, and named-registry slots in that
+order. The selected definition is copied into extension-owned bounded memory,
+scanned before server access, and released through the provider exactly once.
+The profile name, provider identity/source, definition, and profile revision
+participate in metadata drift detection.
 
 ## Validation boundary
 
@@ -39,8 +47,9 @@ least-privilege role, schema-qualified object names, a controlled `search_path`,
 revoked unnecessary `EXECUTE` privileges, and approved query profiles. The
 calling application must explicitly warn users when inline queries are enabled.
 
-Raw query text, profile content, and values never enter normal logs, errors, or
-fingerprints. Debug SQL is allowed only by the existing compile-time
+Raw query text, profile content, and values never enter normal logs or errors.
+Fingerprints are bounded one-way hashes and never expose the source text. Debug
+SQL is allowed only by the existing compile-time
 `VPS_DEBUG` and runtime `debug` gate; Release and RelWithDebInfo builds reject
 the field.
 
@@ -52,9 +61,9 @@ only; a query source never gains DML support. `query_indexes` uses the grammar
 remote or unique index. Unique planning may rely only on validated
 `key_columns`.
 
-The query fingerprint includes the normalized query hash/profile version,
+The query fingerprint includes the normalized query hash/profile revision,
 ordered aliases and OID/typmod/origin/collation metadata, spatial policy, keys,
-query indexes, materialization mode, and wrapper/codec versions. A change to
+query indexes, materialization mode, and wrapper/codec revisions. A change to
 any contract-relevant component is metadata drift.
 
 ## Query materialization

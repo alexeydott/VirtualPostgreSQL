@@ -1,6 +1,10 @@
-# Stage 0 libpq prototype findings
+# libpq prototype findings
 
-This document records the contracts proved by the disposable Stage 0 programs. It is not a production API specification. Raw evidence is generated under the ignored `build/prototype-evidence/` directory and contains no connection strings, credentials, SQL text, bound values, result rows, or spatial payloads.
+This document records the contracts proved by the disposable prototype
+programs. It is not a production API specification. Raw evidence is generated
+under the ignored `build/prototype-evidence/` directory and contains no
+connection strings, credentials, SQL text, bound values, result rows, or
+spatial payloads.
 
 ## Reproducible contour
 
@@ -49,7 +53,7 @@ Loss before a terminal command is accepted is classified non-ambiguous; loss aft
 
 ### PostGIS discovery
 
-Discovery is anchored on `pg_extension` plus namespace, type, and procedure catalogs and produces schema-qualified calls; an unrelated same-name object is not accepted as a capability signal. Separate absent and PostGIS 3.4.1 present contours passed on Win32 and x64. The present contour used the default extension schema and verified catalog-derived geometry/geography OIDs and required functions, 14 geometry WKT-to-WKB round trips across Point, LineString, Polygon, Multi* and GeometryCollection classes, four EMPTY variants, 2D/Z/M/ZM dimensions, a geography WKT/WKB round trip, NULL-vs-EMPTY, explicit SRID-mismatch rejection without transformation, malformed WKT/WKB errors, terminal drain, and exact result cleanup. A custom extension-schema stand remains unavailable, so that later production contour is not claimed by Stage 0.
+Discovery is anchored on `pg_extension` plus namespace, type, and procedure catalogs and produces schema-qualified calls; an unrelated same-name object is not accepted as a capability signal. Separate absent and PostGIS-present contours passed on Win32 and x64. The present contour used the default extension schema and verified catalog-derived geometry/geography OIDs and required functions, 14 geometry WKT-to-WKB round trips across Point, LineString, Polygon, Multi* and GeometryCollection classes, four EMPTY variants, 2D/Z/M/ZM dimensions, a geography WKT/WKB round trip, NULL-vs-EMPTY, explicit SRID-mismatch rejection without transformation, malformed WKT/WKB errors, terminal drain, and exact result cleanup. A custom extension-schema stand remains unavailable, so the prototype evidence does not claim that contour.
 
 ### Million-row stream and controlled loss
 
@@ -78,4 +82,5 @@ pwsh -NoProfile -File scripts/prototypes/test-stage0.ps1 -Architecture x64 -Mill
 pwsh -NoProfile -File scripts/prototypes/test-postgis.ps1
 ```
 
-The Stage 0 runner rejects unsafe log content, records aggregate manifests, and inspects executable imports. Build products and evidence remain outside Git.
+The prototype runner rejects unsafe log content, records aggregate manifests,
+and inspects executable imports. Build products and evidence remain outside Git.

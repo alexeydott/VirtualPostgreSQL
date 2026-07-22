@@ -1,4 +1,4 @@
-# VirtualPostgreSQL Stage 0 prototypes
+# VirtualPostgreSQL libpq prototypes
 
 This directory contains disposable-but-reproducible libpq programs used to prove Windows contracts before production modules are designed. Prototype code may call `PQ*` directly; production code added in later stages must place all libpq ownership in `vps_libpq_client*`.
 
@@ -10,7 +10,9 @@ This directory contains disposable-but-reproducible libpq programs used to prove
 - Exact binary `bytea`, secure cancellation and bounded drain-or-destroy.
 - Eight independent connections, transaction/savepoint states, PostGIS discovery and controlled network loss.
 
-Stage 0 does not create the production extension, public ABI or connection pool. Build products and runtime evidence stay under ignored `build/`.
+These disposable programs do not create the production extension, public ABI,
+or connection pool. Build products and runtime evidence stay under ignored
+`build/`.
 
 ## Security boundary
 
@@ -37,7 +39,8 @@ pwsh -NoProfile -File scripts/deps/build-libpq.ps1 -Clean
 pwsh -NoProfile -File scripts/deps/verify-libpq.ps1 -TestWrongArchitecture -TestMissingFeature
 ```
 
-Build and run the Stage 0 prototype matrix after supplying the six `VPS_TEST_*` environment values from a local ignored configuration:
+Build and run the prototype matrix after supplying the six `VPS_TEST_*`
+environment values from a local ignored configuration:
 
 ```powershell
 pwsh -NoProfile -File scripts/prototypes/build.ps1 -Clean

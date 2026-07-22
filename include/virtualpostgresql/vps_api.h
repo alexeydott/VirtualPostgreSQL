@@ -56,6 +56,39 @@ typedef uint64_t VpsCredentialFields;
 #define VPS_CANCEL_UNAVAILABLE INT32_C(2)
 #define VPS_CANCEL_ERROR INT32_C(3)
 
+/* Query-profile provider callbacks return one of these stable statuses. */
+#define VPS_QUERY_PROFILE_PROVIDER_OK INT32_C(0)
+#define VPS_QUERY_PROFILE_PROVIDER_NOT_FOUND INT32_C(1)
+#define VPS_QUERY_PROFILE_PROVIDER_UNAVAILABLE INT32_C(2)
+#define VPS_QUERY_PROFILE_PROVIDER_INVALID_NAME INT32_C(3)
+#define VPS_QUERY_PROFILE_PROVIDER_ERROR INT32_C(4)
+
+/* Query-profile provider slots are consulted in this order. */
+#define VPS_QUERY_PROFILE_SOURCE_HOST UINT32_C(0)
+#define VPS_QUERY_PROFILE_SOURCE_PROTECTED_CONFIG UINT32_C(1)
+#define VPS_QUERY_PROFILE_SOURCE_ENVIRONMENT UINT32_C(2)
+#define VPS_QUERY_PROFILE_SOURCE_NAMED_REGISTRY UINT32_C(3)
+
+/* Bounded UTF-8 profile names and SQL definitions exclude a trailing NUL. */
+#define VPS_QUERY_PROFILE_NAME_MAX_LENGTH UINT32_C(255)
+#define VPS_QUERY_PROFILE_QUERY_MAX_LENGTH UINT32_C(1048576)
+
+/* present_fields bits for VpsQueryProfileProvider. */
+#define VPS_QUERY_PROFILE_PROVIDER_FIELD_RESOLVE (UINT64_C(1) << 0)
+#define VPS_QUERY_PROFILE_PROVIDER_FIELD_RELEASE (UINT64_C(1) << 1)
+#define VPS_QUERY_PROFILE_PROVIDER_FIELD_CONTEXT (UINT64_C(1) << 2)
+#define VPS_QUERY_PROFILE_PROVIDER_FIELDS_CURRENT \
+  (VPS_QUERY_PROFILE_PROVIDER_FIELD_RESOLVE | \
+   VPS_QUERY_PROFILE_PROVIDER_FIELD_RELEASE | \
+   VPS_QUERY_PROFILE_PROVIDER_FIELD_CONTEXT)
+
+/* present_fields bits for VpsQueryProfileLease. */
+#define VPS_QUERY_PROFILE_LEASE_FIELD_QUERY (UINT64_C(1) << 0)
+#define VPS_QUERY_PROFILE_LEASE_FIELD_PROVIDER_LEASE (UINT64_C(1) << 1)
+#define VPS_QUERY_PROFILE_LEASE_FIELDS_CURRENT \
+  (VPS_QUERY_PROFILE_LEASE_FIELD_QUERY | \
+   VPS_QUERY_PROFILE_LEASE_FIELD_PROVIDER_LEASE)
+
 /*
  * present_fields bits for VpsCredentialProvider. A zero mask is accepted as
  * the legacy 1.0 prefix; non-zero masks must advertise required callbacks.
@@ -198,6 +231,51 @@ typedef struct VpsCredentialProvider {
     uintptr_t reserved[4];
 } VpsCredentialProvider;
 
+/**
+ * Provider-owned query definition returned by a successful profile resolve.
+ * Query bytes are length-delimited UTF-8 and remain valid until release.
+ */
+typedef struct VpsQueryProfileLease {
+    VpsAbiHeader header;
+    const char *query;
+    uint32_t query_length;
+    uint64_t profile_revision;
+    void *provider_lease;
+    uintptr_t reserved[4];
+} VpsQueryProfileLease;
+
+/**
+ * Resolves a bounded UTF-8 profile name into one self-contained SELECT.
+ * Returns one of the stable VPS_QUERY_PROFILE_PROVIDER_* status values.
+ */
+typedef int32_t(VPS_CALL *VpsQueryProfileResolveFn)(
+    void *provider_context,
+    const char *profile_name,
+    uint32_t profile_name_length,
+    VpsQueryProfileLease *lease);
+
+/**
+ * Releases one successful query-profile lease after checked copy and scan.
+ * The callback is invoked exactly once, including subsequent validation or
+ * allocation failures.
+ */
+typedef void(VPS_CALL *VpsQueryProfileReleaseFn)(
+    void *provider_context,
+    VpsQueryProfileLease *lease);
+
+/**
+ * Host-supplied query-profile callbacks and borrowed provider context.
+ * The callbacks and context must remain valid until the SQLite connection is
+ * closed. A provider may resolve profiles concurrently.
+ */
+typedef struct VpsQueryProfileProvider {
+    VpsAbiHeader header;
+    VpsQueryProfileResolveFn resolve;
+    VpsQueryProfileReleaseFn release;
+    void *provider_context;
+    uintptr_t reserved[4];
+} VpsQueryProfileProvider;
+
 /** Returns the encoded VirtualPostgreSQL public API version. */
 VPS_API uint32_t VPS_CALL virtualpostgresql_api_version(void);
 
@@ -210,6 +288,12 @@ VPS_API uint32_t VPS_CALL virtualpostgresql_credential_lease_structure_size(void
 /** Returns the runtime size of VpsCredentialProvider for ABI negotiation. */
 VPS_API uint32_t VPS_CALL virtualpostgresql_credential_provider_structure_size(void);
 
+/** Returns the runtime size of VpsQueryProfileLease for ABI negotiation. */
+VPS_API uint32_t VPS_CALL virtualpostgresql_query_profile_lease_structure_size(void);
+
+/** Returns the runtime size of VpsQueryProfileProvider for ABI negotiation. */
+VPS_API uint32_t VPS_CALL virtualpostgresql_query_profile_provider_structure_size(void);
+
 /**
  * Registers a credential provider for one loaded host SQLite connection.
  * Replacement is allowed only before that connection starts its first resolve.
@@ -217,6 +301,18 @@ VPS_API uint32_t VPS_CALL virtualpostgresql_credential_provider_structure_size(v
  */
 VPS_API int VPS_CALL virtualpostgresql_register_credential_provider(
     sqlite3 *database, const VpsCredentialProvider *provider);
+
+/**
+ * Registers one query-profile provider source for a loaded SQLite connection.
+ * Sources are resolved in HOST, PROTECTED_CONFIG, ENVIRONMENT, then
+ * NAMED_REGISTRY order. Replacement is forbidden after the source's first
+ * resolve. Returns a SQLite result code.
+ */
+VPS_API int VPS_CALL virtualpostgresql_register_query_profile_provider(
+    sqlite3 *database,
+    uint32_t source,
+    uint64_t provider_id,
+    const VpsQueryProfileProvider *provider);
 
 #if defined(_WIN32)
 /**

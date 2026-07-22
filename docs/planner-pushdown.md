@@ -2,15 +2,15 @@
 
 # Planner and safe pushdown
 
-VirtualPostgreSQL 0.8 adds a bounded planner between SQLite `xBestIndex` and
-`xFilter`. The planner produces a printable, versioned compiled plan. Every
-plan carries the source fingerprint and fixed-width counts; `xFilter` rejects
-unknown versions, fingerprint drift, truncation, malformed fields and bounds
+Currently, a bounded planner sits between SQLite `xBestIndex` and `xFilter`.
+It produces a printable, format-tagged compiled plan. Every plan carries the
+source fingerprint and fixed-width counts; `xFilter` rejects unknown formats,
+fingerprint drift, truncation, malformed fields and bounds
 violations before acquiring a PostgreSQL connection.
 
 ## Exactness policy
 
-The Windows 1.0 planner is deliberately conservative:
+The current planner is deliberately conservative:
 
 - integer and boolean comparisons can be pushed for compatible SQLite values;
 - canonical lowercase UUID equality and byte-exact `bytea` equality can be
@@ -56,7 +56,7 @@ deterministic estimates from available row/page/index-prefix metadata and a
 fixed fallback. `xBestIndex` never executes remote `EXPLAIN`.
 
 Planner decisions are observable through structured debug fields containing
-only version, flags, counts, estimated cost/rows and source fingerprint. Raw
+only the plan format, flags, counts, estimated cost/rows and source fingerprint. Raw
 values and connection information are excluded.
 
 ## See Also

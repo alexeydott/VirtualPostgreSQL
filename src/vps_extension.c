@@ -54,6 +54,35 @@ int VPS_CALL virtualpostgresql_register_credential_provider(
 #endif
 }
 
+int VPS_CALL virtualpostgresql_register_query_profile_provider(
+    sqlite3 *database,
+    uint32_t source,
+    uint64_t provider_id,
+    const VpsQueryProfileProvider *provider)
+{
+    VpsModuleContext *context;
+    VpsQueryProfileResult result;
+    if (database == NULL || provider == NULL || provider_id == 0U ||
+        source > VPS_QUERY_PROFILE_SOURCE_NAMED_REGISTRY)
+        return SQLITE_MISUSE;
+    context = (VpsModuleContext *)sqlite3_get_clientdata(
+        database, VPS_MODULE_CLIENTDATA_KEY);
+    if (context == NULL || context->closing ||
+        !context->initialized_query_profile_registry)
+        return SQLITE_NOTFOUND;
+    result = vps_query_profile_registry_register(
+        &context->query_profile_registry, (VpsQueryProfileSource)source,
+        provider_id, provider);
+    if (result == VPS_QUERY_PROFILE_OK) return SQLITE_OK;
+    if (result == VPS_QUERY_PROFILE_REPLACEMENT_FORBIDDEN ||
+        result == VPS_QUERY_PROFILE_BUSY)
+        return SQLITE_BUSY;
+    if (result == VPS_QUERY_PROFILE_INVALID_ARGUMENT ||
+        result == VPS_QUERY_PROFILE_ABI_INCOMPATIBLE)
+        return SQLITE_MISUSE;
+    return SQLITE_ERROR;
+}
+
 #if defined(_WIN32)
 int VPS_CALL virtualpostgresql_wincred_provider(
     VpsCredentialProvider *provider)
@@ -116,11 +145,11 @@ static void vps_capabilities_sql(sqlite3_context *context,
     (void)arguments;
 #if defined(VPS_ENABLE_QUERY_MATERIALIZATION)
     sqlite3_result_text(context,
-                        "read-write,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,query-materialization-memory,query-materialization-temp,keyed-dml,transactions,savepoints,metadata-functions,metadata-cache", -1,
+                        "read-write,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,query-profile-provider,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,query-materialization-memory,query-materialization-temp,keyed-dml,transactions,savepoints,metadata-functions,metadata-cache", -1,
                         SQLITE_STATIC);
 #else
     sqlite3_result_text(context,
-                        "read-write,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,keyed-dml,transactions,savepoints,metadata-functions,metadata-cache", -1,
+                        "read-write,module-v4,xIntegrity,directonly,async-libpq,single-row,secure-cancel,host-cancel,query-profile-provider,planner,predicate-pushdown,projection-pushdown,order-pushdown,limit-pushdown,keyed-dml,transactions,savepoints,metadata-functions,metadata-cache", -1,
                         SQLITE_STATIC);
 #endif
 }

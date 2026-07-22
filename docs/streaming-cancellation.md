@@ -2,7 +2,7 @@
 
 # Streaming, cancellation and concurrency
 
-VirtualPostgreSQL 0.9 publishes PostgreSQL rows through a narrow cursor state
+Currently, VirtualPostgreSQL publishes PostgreSQL rows through a narrow cursor state
 machine: `NEW → OPEN → FILTERING ↔ WAITING → ROW_READY → EOF`. Cancellation
 uses the explicit `CANCELLING` state and invariant failures use `FAILED`; every
 cursor terminates in `CLOSED`. A row becomes visible to SQLite only after all
@@ -36,7 +36,7 @@ query-byte, parameter-byte, identity-byte and `IN` limits, plus reserved spatial
 point/depth defaults. Result-byte and spatial defaults are architecture-aware;
 the x86 contour uses smaller bounds than x64.
 
-## Stage 9 verification
+## Current verification
 
 `scripts/ci/run-stage9.ps1` builds MSVC Win32 Debug, MSVC x64 Release, clang-cl
 x64 Debug and clang-cl x64 ASan. The optional local stand runs the data-heavy

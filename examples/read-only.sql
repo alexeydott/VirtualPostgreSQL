@@ -1,4 +1,4 @@
--- credential_ref разрешается host provider; secret не хранится в SQL.
+-- credential_ref is resolved by the host provider; no secret is stored here.
 CREATE VIRTUAL TABLE temp.remote_orders USING VirtualPostgreSQL(
   credential_ref='app/reporting',
   source=table,

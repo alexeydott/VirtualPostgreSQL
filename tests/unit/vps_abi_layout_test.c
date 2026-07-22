@@ -13,6 +13,10 @@ _Static_assert(sizeof(VpsCredentialLease) == 40U,
                "VpsCredentialLease Win32 ABI 1.0 size");
 _Static_assert(sizeof(VpsCredentialProvider) == 48U,
                "VpsCredentialProvider Win32 ABI 1.0 size");
+_Static_assert(sizeof(VpsQueryProfileLease) == 56U,
+               "VpsQueryProfileLease Win32 ABI size");
+_Static_assert(sizeof(VpsQueryProfileProvider) == 48U,
+               "VpsQueryProfileProvider Win32 ABI size");
 #elif UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(VpsCredentialConfig) == 200U,
                "VpsCredentialConfig x64 ABI 1.0 size");
@@ -20,6 +24,10 @@ _Static_assert(sizeof(VpsCredentialLease) == 64U,
                "VpsCredentialLease x64 ABI 1.0 size");
 _Static_assert(sizeof(VpsCredentialProvider) == 72U,
                "VpsCredentialProvider x64 ABI 1.0 size");
+_Static_assert(sizeof(VpsQueryProfileLease) == 80U,
+               "VpsQueryProfileLease x64 ABI size");
+_Static_assert(sizeof(VpsQueryProfileProvider) == 72U,
+               "VpsQueryProfileProvider x64 ABI size");
 #else
 #error Unsupported Windows 1.0 pointer width
 #endif
@@ -29,6 +37,10 @@ _Static_assert(offsetof(VpsCredentialLease, header) == 0U,
                "VpsCredentialLease ABI header prefix");
 _Static_assert(offsetof(VpsCredentialProvider, header) == 0U,
                "VpsCredentialProvider ABI header prefix");
+_Static_assert(offsetof(VpsQueryProfileLease, header) == 0U,
+               "VpsQueryProfileLease ABI header prefix");
+_Static_assert(offsetof(VpsQueryProfileProvider, header) == 0U,
+               "VpsQueryProfileProvider ABI header prefix");
 
 static int vps_expect(int condition, const char *check_name)
 {
@@ -52,6 +64,10 @@ int main(void)
     volatile size_t config_header_offset = offsetof(VpsCredentialConfig, header);
     volatile size_t lease_header_offset = offsetof(VpsCredentialLease, header);
     volatile size_t provider_header_offset = offsetof(VpsCredentialProvider, header);
+    volatile size_t query_lease_header_offset =
+        offsetof(VpsQueryProfileLease, header);
+    volatile size_t query_provider_header_offset =
+        offsetof(VpsQueryProfileProvider, header);
     int passed = 1;
 
     passed &= vps_expect(pointer_size == 4U || pointer_size == 8U,
@@ -62,6 +78,10 @@ int main(void)
                          "lease_header_prefix");
     passed &= vps_expect(provider_header_offset == 0U,
                          "provider_header_prefix");
+    passed &= vps_expect(query_lease_header_offset == 0U,
+                         "query_lease_header_prefix");
+    passed &= vps_expect(query_provider_header_offset == 0U,
+                         "query_provider_header_prefix");
     passed &= vps_expect(virtualpostgresql_api_version() == VPS_API_VERSION,
                          "api_version_function");
     passed &= vps_expect(
@@ -76,6 +96,14 @@ int main(void)
         virtualpostgresql_credential_provider_structure_size() ==
             sizeof(VpsCredentialProvider),
         "provider_structure_size_function");
+    passed &= vps_expect(
+        virtualpostgresql_query_profile_lease_structure_size() ==
+            sizeof(VpsQueryProfileLease),
+        "query_profile_lease_structure_size_function");
+    passed &= vps_expect(
+        virtualpostgresql_query_profile_provider_structure_size() ==
+            sizeof(VpsQueryProfileProvider),
+        "query_profile_provider_structure_size_function");
     passed &= vps_expect(
         vps_abi_validate_header(&header, (uint32_t)sizeof(header),
                                 VPS_API_VERSION) == VPS_ABI_VALID,
@@ -102,9 +130,11 @@ int main(void)
     (void)printf(
         "[abi] level=info version=%" PRIu32
         " pointer_bits=%zu config_size=%zu lease_size=%zu provider_size=%zu "
+        "query_lease_size=%zu query_provider_size=%zu "
         "status=%s\n",
         VPS_API_VERSION, sizeof(void *) * 8, sizeof(VpsCredentialConfig),
         sizeof(VpsCredentialLease), sizeof(VpsCredentialProvider),
+        sizeof(VpsQueryProfileLease), sizeof(VpsQueryProfileProvider),
         passed ? "passed" : "failed");
     return passed ? 0 : 1;
 }

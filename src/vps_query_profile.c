@@ -53,7 +53,7 @@ static void vps_profile_log(VpsQueryProfileRegistry *registry,
                             VpsQueryProfileSource source,
                             uint64_t name_fingerprint,
                             uint64_t generation,
-                            uint64_t profile_version,
+                            uint64_t profile_revision,
                             const char *status,
                             VpsLogLevel level)
 {
@@ -70,7 +70,7 @@ static void vps_profile_log(VpsQueryProfileRegistry *registry,
     (void)vps_log_event_add_uint64(&event, VPS_LOG_FIELD_GENERATION,
                                    generation);
     (void)vps_log_event_add_uint64(&event, VPS_LOG_FIELD_VERSION,
-                                   profile_version);
+                                   profile_revision);
     (void)vps_log_event_add_string(&event, VPS_LOG_FIELD_STATUS,
                                    status, strlen(status));
     vps_logger_emit(registry->logger, &event);
@@ -101,17 +101,24 @@ VpsQueryProfileResult vps_query_profile_registry_register(
 {
     VpsQueryProfileProviderSlot *slot;
     VpsQueryProfileResult result;
-    uint32_t minimum = (uint32_t)(offsetof(VpsQueryProfileProvider,
-                                           provider_context) +
-                                   sizeof(provider->provider_context));
+    uint32_t minimum =
+        (uint32_t)(offsetof(VpsQueryProfileProvider, provider_context) +
+                   sizeof(provider->provider_context));
     if (registry == NULL || !registry->initialized ||
         !vps_profile_source_valid(source) || provider_id == 0U ||
         provider == NULL || provider->resolve == NULL ||
         provider->release == NULL) {
         return VPS_QUERY_PROFILE_INVALID_ARGUMENT;
     }
-    if (provider->structure_size < minimum ||
-        provider->contract_version != VPS_QUERY_PROFILE_CONTRACT_VERSION) {
+    if (provider->header.structure_size < minimum ||
+        ((provider->header.api_version >> 24) & UINT32_C(0xff)) !=
+            VPS_API_VERSION_MAJOR ||
+        (provider->header.present_fields != 0U &&
+         (provider->header.present_fields &
+          (VPS_QUERY_PROFILE_PROVIDER_FIELD_RESOLVE |
+           VPS_QUERY_PROFILE_PROVIDER_FIELD_RELEASE)) !=
+             (VPS_QUERY_PROFILE_PROVIDER_FIELD_RESOLVE |
+              VPS_QUERY_PROFILE_PROVIDER_FIELD_RELEASE))) {
         return VPS_QUERY_PROFILE_ABI_INCOMPATIBLE;
     }
     result = vps_profile_lock(registry);
@@ -125,7 +132,11 @@ VpsQueryProfileResult vps_query_profile_registry_register(
         (void)vps_profile_unlock(registry);
         return VPS_QUERY_PROFILE_BUSY;
     }
-    slot->provider = *provider;
+    (void)memset(&slot->provider, 0, sizeof(slot->provider));
+    slot->provider.header = provider->header;
+    slot->provider.resolve = provider->resolve;
+    slot->provider.release = provider->release;
+    slot->provider.provider_context = provider->provider_context;
     slot->provider_id = provider_id;
     ++slot->generation;
     slot->registered = 1;
@@ -144,7 +155,7 @@ VpsQueryProfileResult vps_resolved_query_profile_init(
     (void)memset(resolved, 0, sizeof(*resolved));
     if (vps_buffer_init(&resolved->query, allocator,
                         VPS_QUERY_SOURCE_MAX_BYTES + 1U) != VPS_MEMORY_OK) {
-        return VPS_QUERY_PROFILE_INVALID_ARGUMENT;
+        return VPS_QUERY_PROFILE_OUT_OF_MEMORY;
     }
     resolved->initialized = 1;
     return VPS_QUERY_PROFILE_OK;
@@ -157,7 +168,7 @@ void vps_resolved_query_profile_cleanup(VpsResolvedQueryProfile *resolved)
     (void)memset(&resolved->analysis, 0, sizeof(resolved->analysis));
     resolved->provider_id = 0U;
     resolved->generation = 0U;
-    resolved->profile_version = 0U;
+    resolved->profile_revision = 0U;
     resolved->name_fingerprint = 0U;
     resolved->source = VPS_QUERY_PROFILE_HOST;
     resolved->initialized = 0;
@@ -167,7 +178,7 @@ static void vps_profile_resolve_finish(VpsQueryProfileRegistry *registry,
                                        VpsQueryProfileSource source,
                                        uint64_t name_fingerprint,
                                        uint64_t generation,
-                                       uint64_t profile_version,
+                                       uint64_t profile_revision,
                                        VpsQueryProfileResult result)
 {
     if (vps_profile_lock(registry) != VPS_QUERY_PROFILE_OK) return;
@@ -175,10 +186,24 @@ static void vps_profile_resolve_finish(VpsQueryProfileRegistry *registry,
         --registry->slots[(size_t)source].active_resolves;
     }
     vps_profile_log(registry, source, name_fingerprint, generation,
-                    profile_version, vps_query_profile_result_name(result),
+                    profile_revision, vps_query_profile_result_name(result),
                     result == VPS_QUERY_PROFILE_OK ? VPS_LOG_LEVEL_DEBUG
                                                    : VPS_LOG_LEVEL_WARN);
     (void)vps_profile_unlock(registry);
+}
+
+static VpsQueryProfileResult vps_profile_provider_result(int32_t result)
+{
+    switch (result) {
+        case VPS_QUERY_PROFILE_PROVIDER_OK: return VPS_QUERY_PROFILE_OK;
+        case VPS_QUERY_PROFILE_PROVIDER_NOT_FOUND:
+            return VPS_QUERY_PROFILE_NOT_FOUND;
+        case VPS_QUERY_PROFILE_PROVIDER_INVALID_NAME:
+            return VPS_QUERY_PROFILE_INVALID_ARGUMENT;
+        case VPS_QUERY_PROFILE_PROVIDER_UNAVAILABLE:
+        case VPS_QUERY_PROFILE_PROVIDER_ERROR:
+        default: return VPS_QUERY_PROFILE_PLATFORM_ERROR;
+    }
 }
 
 VpsQueryProfileResult vps_query_profile_registry_resolve(
@@ -192,7 +217,7 @@ VpsQueryProfileResult vps_query_profile_registry_resolve(
     VpsQueryProfileProvider provider;
     VpsQueryProfileLease lease;
     VpsQueryProfileResult result;
-    uint64_t profile_version = 0U;
+    uint64_t profile_revision = 0U;
     uint64_t provider_id;
     uint64_t generation;
     uint64_t name_fingerprint;
@@ -224,20 +249,28 @@ VpsQueryProfileResult vps_query_profile_registry_resolve(
     if (result != VPS_QUERY_PROFILE_OK) return result;
 
     (void)memset(&lease, 0, sizeof(lease));
-    lease.structure_size = (uint32_t)sizeof(lease);
-    lease.contract_version = VPS_QUERY_PROFILE_CONTRACT_VERSION;
-    result = provider.resolve(provider.provider_context, profile_name,
-                              profile_name_length, &lease);
+    lease.header.structure_size = (uint32_t)sizeof(lease);
+    lease.header.api_version = VPS_API_VERSION;
+    lease.header.present_fields = VPS_QUERY_PROFILE_LEASE_FIELDS_CURRENT;
+    result = vps_profile_provider_result(provider.resolve(
+        provider.provider_context, profile_name, (uint32_t)profile_name_length,
+        &lease));
     if (result != VPS_QUERY_PROFILE_OK) {
         vps_profile_resolve_finish(registry, source, name_fingerprint,
                                    generation, 0U, result);
         return result;
     }
-    if (lease.structure_size < sizeof(lease) ||
-        lease.contract_version != VPS_QUERY_PROFILE_CONTRACT_VERSION ||
+    if (lease.header.structure_size <
+            offsetof(VpsQueryProfileLease, provider_lease) +
+                sizeof(lease.provider_lease) ||
+        ((lease.header.api_version >> 24) & UINT32_C(0xff)) !=
+            VPS_API_VERSION_MAJOR ||
+        (lease.header.present_fields != 0U &&
+         (lease.header.present_fields & VPS_QUERY_PROFILE_LEASE_FIELD_QUERY) ==
+             0U) ||
         lease.query == NULL || lease.query_length == 0U ||
         lease.query_length > VPS_QUERY_SOURCE_MAX_BYTES ||
-        lease.profile_version == 0U) {
+        lease.profile_revision == 0U) {
         result = VPS_QUERY_PROFILE_INVALID_LEASE;
     } else if (vps_buffer_append(&resolved->query, lease.query,
                                  lease.query_length) != VPS_MEMORY_OK ||
@@ -250,13 +283,13 @@ VpsQueryProfileResult vps_query_profile_registry_resolve(
                VPS_QUERY_SOURCE_OK) {
         result = VPS_QUERY_PROFILE_INVALID_QUERY;
     }
-    profile_version = lease.profile_version;
+    profile_revision = lease.profile_revision;
     provider.release(provider.provider_context, &lease);
     if (result == VPS_QUERY_PROFILE_OK) {
         resolved->source = source;
         resolved->provider_id = provider_id;
         resolved->generation = generation;
-        resolved->profile_version = profile_version;
+        resolved->profile_revision = profile_revision;
         resolved->name_fingerprint = name_fingerprint;
     } else {
         vps_buffer_reset(&resolved->query);
@@ -264,7 +297,7 @@ VpsQueryProfileResult vps_query_profile_registry_resolve(
                               VPS_QUERY_SOURCE_MAX_BYTES + 1U);
     }
     vps_profile_resolve_finish(registry, source, name_fingerprint, generation,
-                               profile_version, result);
+                               profile_revision, result);
     return result;
 }
 

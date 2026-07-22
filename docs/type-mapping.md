@@ -2,7 +2,7 @@
 
 # Type mapping
 
-Windows 1.0 primarily uses PostgreSQL text result format. The OID, typmod,
+Currently, PostgreSQL values primarily use text result format. The OID, typmod,
 domain base type, and catalog metadata select the codec; an unknown type is
 never silently narrowed.
 

@@ -4,12 +4,13 @@
 #include "vps_memory.h"
 #include "vps_platform.h"
 #include "vps_query_source.h"
+#include "virtualpostgresql/vps_api.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
-#define VPS_QUERY_PROFILE_CONTRACT_VERSION UINT32_C(1)
-#define VPS_QUERY_PROFILE_MAX_NAME_BYTES 255U
+#define VPS_QUERY_PROFILE_MAX_NAME_BYTES \
+    ((size_t)VPS_QUERY_PROFILE_NAME_MAX_LENGTH)
 #define VPS_QUERY_PROFILE_PROVIDER_COUNT 4U
 
 typedef enum VpsQueryProfileSource {
@@ -32,32 +33,6 @@ typedef enum VpsQueryProfileResult {
     VPS_QUERY_PROFILE_BUSY = 9,
     VPS_QUERY_PROFILE_PLATFORM_ERROR = 10
 } VpsQueryProfileResult;
-
-typedef struct VpsQueryProfileLease {
-    uint32_t structure_size;
-    uint32_t contract_version;
-    const char *query;
-    size_t query_length;
-    uint64_t profile_version;
-    void *lease_context;
-} VpsQueryProfileLease;
-
-typedef VpsQueryProfileResult (*VpsQueryProfileResolveFunction)(
-    void *provider_context,
-    const char *profile_name,
-    size_t profile_name_length,
-    VpsQueryProfileLease *lease);
-typedef void (*VpsQueryProfileReleaseFunction)(
-    void *provider_context,
-    VpsQueryProfileLease *lease);
-
-typedef struct VpsQueryProfileProvider {
-    uint32_t structure_size;
-    uint32_t contract_version;
-    VpsQueryProfileResolveFunction resolve;
-    VpsQueryProfileReleaseFunction release;
-    void *provider_context;
-} VpsQueryProfileProvider;
 
 typedef struct VpsQueryProfileProviderSlot {
     VpsQueryProfileProvider provider;
@@ -84,7 +59,7 @@ typedef struct VpsResolvedQueryProfile {
     VpsQueryProfileSource source;
     uint64_t provider_id;
     uint64_t generation;
-    uint64_t profile_version;
+    uint64_t profile_revision;
     uint64_t name_fingerprint;
     int initialized;
 } VpsResolvedQueryProfile;

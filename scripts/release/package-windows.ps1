@@ -64,7 +64,6 @@ Copy-PackageFile (Join-Path $repro 'x86-pass1\virtualpostgresql.dll') 'bin\win32
 Copy-PackageFile (Join-Path $repro 'x64-pass1\virtualpostgresql.dll') 'bin\x64\virtualpostgresql.dll'
 Copy-PackageFile (Join-Path $rootPath 'include\virtualpostgresql\vps_api.h') 'include\virtualpostgresql\vps_api.h'
 Copy-PackageFile (Join-Path $rootPath 'README.md') 'docs\README.md'
-Copy-PackageFile (Join-Path $rootPath 'VirtualPostgreSQL_Technical_Specification.md') 'docs\TECHNICAL_SPECIFICATION.md'
 $docMap = [ordered]@{
     'security.md'='SECURITY.md'; 'type-mapping.md'='TYPE_MAPPING.md';
     'query-sources.md'='QUERY_SOURCE.md';
@@ -73,8 +72,8 @@ $docMap = [ordered]@{
     'metadata-functions-cache.md'='METADATA_CACHE.md';
     'troubleshooting.md'='TROUBLESHOOTING.md';
     'platform-support.md'='PLATFORM_SUPPORT.md';
-    'release-notes-1.0.0.md'='RELEASE_NOTES.md';
-    'windows-1.0-acceptance.md'='WINDOWS_1_0_ACCEPTANCE.md'
+    'release-notes-current.md'='RELEASE_NOTES.md';
+    'windows-current-acceptance.md'='WINDOWS_ACCEPTANCE.md'
 }
 foreach ($entry in $docMap.GetEnumerator()) {
     Copy-PackageFile (Join-Path $rootPath "docs\$($entry.Key)") "docs\$($entry.Value)"
@@ -130,6 +129,16 @@ $sbom = [ordered]@{
     version=1; metadata=[ordered]@{component=$components[0]};
     components=@($components | Select-Object -Skip 1)
 }
+
+function Assert-PackageMarkdownEnglish {
+    foreach ($markdown in Get-ChildItem -LiteralPath $stage -Recurse -File -Filter '*.md') {
+        $content = Get-Content -LiteralPath $markdown.FullName -Raw
+        if ($content -match '[А-Яа-яЁё]') {
+            $relative = [IO.Path]::GetRelativePath($stage, $markdown.FullName)
+            throw "[package] non-English Markdown content found: $relative"
+        }
+    }
+}
 $sbom | ConvertTo-Json -Depth 10 | Set-Content `
     -LiteralPath (Join-Path $stage 'sbom\cyclonedx.json') -Encoding utf8
 
@@ -158,6 +167,8 @@ $provenance = [ordered]@{
 }
 $provenance | ConvertTo-Json -Depth 12 | Set-Content `
     -LiteralPath (Join-Path $stage 'provenance\slsa-provenance.json') -Encoding utf8
+
+Assert-PackageMarkdownEnglish
 
 $payloadFiles = @(Get-ChildItem -LiteralPath $stage -Recurse -File | Sort-Object FullName)
 $manifestFiles = @($payloadFiles | ForEach-Object {

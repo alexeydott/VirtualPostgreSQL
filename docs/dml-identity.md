@@ -10,9 +10,9 @@ metadata is the authority for key, generated-column and identity-column policy;
 
 Rows with a single integral key use the SQLite rowid only when optimistic
 locking is disabled. Composite keys and optimistic modes expose a hidden
-`__vps_identity` BLOB. The token is versioned, bounded, relation-scoped and
+`__vps_identity` BLOB. The token is format-tagged, bounded, relation-scoped and
 length-prefixed, and carries typed original key fields plus the optional
-original version. UPDATE and DELETE decode it strictly and bind the original
+original optimistic value. UPDATE and DELETE decode it strictly and bind the original
 key with `IS NOT DISTINCT FROM` predicates.
 
 ## INSERT defaults and NULL

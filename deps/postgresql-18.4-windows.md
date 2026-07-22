@@ -1,6 +1,6 @@
 # PostgreSQL 18.4 static libpq build notes
 
-Stage 0 builds only the pinned PostgreSQL client archives required by the prototypes. PostgreSQL 18.4 no longer ships the legacy `src/tools/msvc` build; the supported source-tree contour here is Meson + Ninja in an MSVC developer environment.
+The prototype dependency workflow builds only the pinned PostgreSQL client archives required by the test programs. The pinned PostgreSQL source no longer ships the legacy `src/tools/msvc` build; the supported source-tree contour here is Meson + Ninja in an MSVC developer environment.
 
 ## Configuration
 

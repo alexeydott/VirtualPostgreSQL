@@ -19,7 +19,7 @@ nesting, finite coordinates, and exact payload length before sending data to
 the server. The extension does not swap coordinate axes, call `ST_Transform`,
 or substitute an SRID.
 
-SpatiaLite output is explicitly unavailable in Windows 1.0. Writes are allowed
+SpatiaLite output is currently unavailable. Writes are allowed
 only for a writable table source with compatible catalog capabilities; query
 sources, views, materialized views, and foreign tables remain read-only.
 

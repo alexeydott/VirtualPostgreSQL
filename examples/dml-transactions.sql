@@ -13,6 +13,6 @@ ROLLBACK TO before_change;
 RELEASE before_change;
 COMMIT;
 
--- __vps_omit отличает server DEFAULT от explicit NULL при INSERT.
+-- __vps_omit distinguishes a server DEFAULT from an explicit NULL on INSERT.
 INSERT INTO remote_items(item_id, quantity, __vps_omit)
 VALUES(1001, NULL, 'quantity');

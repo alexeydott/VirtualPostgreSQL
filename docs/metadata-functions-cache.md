@@ -29,8 +29,8 @@ Each persistent VirtualPostgreSQL table owns exactly one row in each shadow
 table:
 
 - `<vtab>_vps_schema` records format, source/layout fingerprints, relation and
-  configuration generation, capture time, codec version, and extension
-  version.
+  configuration generation, capture time, codec revision, and extension build
+  identifier.
 - `<vtab>_vps_metadata` stores one deterministic, checksummed portable blob
   and its last-validation time.
 
@@ -51,7 +51,7 @@ validation.
 visible names/types, relation origins, keys, spatial codecs/SRIDs, and relation
 identity; narrowing or drop/recreate remains an error.
 
-SQLite `PRAGMA integrity_check` validates shadow row counts, versions, bounds,
+SQLite `PRAGMA integrity_check` validates shadow row counts, format identifiers, bounds,
 checksum/decode, unique field names, key references, spatial metadata, and the
 schema-row fingerprints without contacting PostgreSQL. A consistency failure
 is reported as integrity text through SQLite's `xIntegrity` contract.
