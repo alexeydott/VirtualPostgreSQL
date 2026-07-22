@@ -1,7 +1,7 @@
 # VirtualPostgreSQL
 
 VirtualPostgreSQL is a SQLite extension that exposes PostgreSQL tables, views, materialized views, foreign tables, approved query results, and PostGIS data as SQLite virtual tables.
-Once loaded, remote data can be accessed through standard SQLite SQL. It can be queried, filtered, ordered, joined with local tables, streamed or materialized, and? when a stable key is available - modified using INSERT, UPDATE, and DELETE within transactions and savepoints.
+Once loaded, remote data can be accessed through standard SQLite SQL. It can be queried, filtered, ordered, joined with local tables, streamed or materialized, and, when a stable key is available - modified using INSERT, UPDATE, and DELETE within transactions and savepoints.
 
 Currently, the extension is distributed as a single virtualpostgresql.dll for Win32 and Win64. It includes the required PostgreSQL client, TLS, compression, and private SQLite components, so no separate libpq or supporting client DLLs are required.
 
